@@ -1,0 +1,157 @@
+// EmorAI — Personal AI Platform
+// Data model. SQLite in this sandbox; portable to PostgreSQL by swapping the
+// datasource provider and DATABASE_URL (no model changes required).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Chat ────────────────────────────────────────────────────────────────────
+
+model Folder {
+  id            String         @id @default(cuid())
+  name          String
+  color         String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  conversations Conversation[]
+}
+
+model Conversation {
+  id            String    @id @default(cuid())
+  title         String    @default("New chat")
+  pinned        Boolean   @default(false)
+  modelId       String
+  folderId      String?
+  folder        Folder?   @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  messages      Message[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastMessageAt DateTime  @default(now())
+
+  @@index([pinned, lastMessageAt])
+  @@index([folderId])
+  @@index([updatedAt])
+}
+
+model Message {
+  id              String      @id @default(cuid())
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  // user | assistant | system
+  role            String
+  content         String
+  // model requested by the user for assistant messages
+  modelId         String?
+  // model actually served by the provider (may differ)
+  servedModel     String?
+  // reasoning trace when the provider returns reasoning_content
+  reasoning       String?
+  webSearch       Boolean     @default(false)
+  // [{ url, name, snippet, host_name }] for web-search augmented answers
+  sources         Json?
+  // [{ id, name, mime, size, kind }] attachments referencing FileMetadata
+  attachments     Json?
+  // complete | stopped | error
+  status          String      @default("complete")
+  errorText       String?
+  promptTokens      Int?
+  completionTokens  Int?
+  totalTokens       Int?
+  latencyMs       Int?
+  createdAt       DateTime    @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model ModelConfig {
+  id              String    @id @default(cuid())
+  // provider model identifier, e.g. "glm-5.3-flash"
+  modelId         String    @unique
+  displayName     String
+  description     String    @default("")
+  // zai | openai | anthropic | ... (adapter routing for future providers)
+  provider        String    @default("zai")
+  // { chat, reasoning, vision, files, webSearch, tools, json }
+  capabilities    Json
+  freeTier        Boolean   @default(true)
+  enabled         Boolean   @default(true)
+  sortOrder       Int       @default(0)
+  // last health-probe result
+  lastCheckedAt   DateTime?
+  lastStatus      String?
+  // what the provider gateway actually reported serving
+  lastServedModel String?
+  lastError       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// ─── API keys (EmorAI developer API) ─────────────────────────────────────────
+
+model ApiKey {
+  id           String        @id @default(cuid())
+  name         String
+  // sha256 hash of the full plaintext key — plaintext is never stored
+  keyHash      String        @unique
+  // display prefix, e.g. "emr_a1b2c3…"
+  prefix       String
+  createdAt    DateTime      @default(now())
+  lastUsedAt   DateTime?
+  revokedAt    DateTime?
+  requestCount Int           @default(0)
+  usageRecords UsageRecord[]
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+model AppSetting {
+  key       String   @id
+  value     String // JSON-encoded payload
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Usage ───────────────────────────────────────────────────────────────────
+
+model UsageRecord {
+  id              String   @id @default(cuid())
+  // dashboard | api
+  source          String
+  apiKeyId        String?
+  apiKey          ApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  conversationId  String?
+  modelId         String
+  servedModel     String?
+  promptTokens    Int      @default(0)
+  completionTokens Int     @default(0)
+  totalTokens     Int      @default(0)
+  latencyMs       Int?
+  success         Boolean  @default(true)
+  errorText       String?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([apiKeyId, createdAt])
+}
+
+// ─── Files ───────────────────────────────────────────────────────────────────
+
+model FileMetadata {
+  id             String   @id @default(cuid())
+  name           String
+  mime           String
+  size           Int
+  // image | document
+  kind           String
+  storagePath    String
+  // text extracted server-side for document analysis
+  extractedText  String?
+  createdAt      DateTime @default(now())
+}
