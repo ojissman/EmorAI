@@ -50,3 +50,47 @@ export const api = {
     return (await res.json()) as T;
   },
 };
+
+// ─── Artifacts & Studio ──────────────────────────────────────────────────────
+
+export const artifactUrls = {
+  file: (id: string) => `/api/artifacts/${id}/file`,
+  preview: (id: string, subpath?: string) =>
+    subpath ? `/api/artifacts/${id}/preview/${subpath}` : `/api/artifacts/${id}/preview`,
+  zip: (id: string) => `/api/artifacts/${id}/zip`,
+};
+
+export type ArtifactListResponse = { artifacts: SerializedArtifactSummary[] };
+
+export type SerializedArtifactSummary = {
+  id: string;
+  kind: string;
+  title: string;
+  status: string;
+  mime: string | null;
+  size: number | null;
+  createdAt: string;
+};
+
+// ─── Voice ───────────────────────────────────────────────────────────────────
+
+export async function transcribeAudioClient(base64: string): Promise<string> {
+  const res = await fetch('/api/voice/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audio: base64 }),
+  });
+  if (!res.ok) throw await parseError(res);
+  const data = (await res.json()) as { text: string };
+  return data.text;
+}
+
+export async function fetchSpeech(text: string, voice?: string, speed?: number): Promise<Blob> {
+  const res = await fetch('/api/voice/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice, speed }),
+  });
+  if (!res.ok) throw await parseError(res);
+  return await res.blob();
+}

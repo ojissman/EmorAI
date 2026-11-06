@@ -165,3 +165,64 @@ export type ProviderMessage = {
   role: ChatRole;
   content: string | ProviderContentPart[];
 };
+
+// ─── Artifacts (Agent + Studio outputs) ──────────────────────────────────────
+
+export type ArtifactKind = 'website' | 'webapp' | 'blog' | 'document' | 'image' | 'video' | 'audio';
+
+export type ArtifactFile = {
+  path: string;
+  content: string;
+  entry?: boolean;
+};
+
+export type SerializedArtifact = {
+  id: string;
+  kind: ArtifactKind;
+  title: string;
+  description: string;
+  prompt: string | null;
+  modelId: string | null;
+  status: 'pending' | 'processing' | 'ready' | 'failed';
+  mime: string | null;
+  size: number | null;
+  error: string | null;
+  meta: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  // detail-only fields
+  files?: ArtifactFile[];
+  providerTaskId?: string;
+};
+
+// ─── Agent runner SSE protocol ───────────────────────────────────────────────
+
+export type AgentStep = {
+  id: string;
+  label: string;
+  status: 'running' | 'done' | 'failed';
+  detail?: string;
+};
+
+export type AgentPlan = {
+  title: string;
+  description: string;
+  pages: string[];
+  features: string[];
+};
+
+export type AgentRunEvent =
+  | { type: 'step'; step: AgentStep }
+  | { type: 'plan'; plan: AgentPlan }
+  | { type: 'file-start'; path: string }
+  | { type: 'file-delta'; path: string; delta: string }
+  | { type: 'file-done'; path: string }
+  | { type: 'artifact'; artifact: SerializedArtifact }
+  | { type: 'error'; message: string; code?: string }
+  | { type: 'done' };
+
+export type AgentTemplate = 'website' | 'webapp' | 'blog' | 'landing' | 'custom';
+
+// ─── Voice ───────────────────────────────────────────────────────────────────
+
+export type TranscribeResponse = { text: string };

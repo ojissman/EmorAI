@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Globe, ImagePlus, Loader2, Paperclip, Square, X } from 'lucide-react';
+import { ArrowUp, Globe, ImagePlus, Loader2, Mic, MicOff, Paperclip, Square, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { toast } from 'sonner';
-import { api } from '@/lib/api-client';
+import { api, transcribeAudioClient } from '@/lib/api-client';
+import { useDictation } from '@/hooks/use-dictation';
 import type { MessageAttachment, ModelInfo } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -28,6 +29,33 @@ export function Composer({ onSend, onStop, isStreaming, model, webSearchDefault,
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
+
+  const dictation = useDictation({
+    onComplete: (audioBase64) => {
+      void (async () => {
+        try {
+          const text = await transcribeAudioClient(audioBase64);
+          dictation.reset();
+          if (!text) {
+            toast.error('Nothing was heard — try speaking a little louder.');
+            return;
+          }
+          setValue((prev) => (prev ? `${prev} ${text}` : text));
+          requestAnimationFrame(() => {
+            resize();
+            textareaRef.current?.focus();
+          });
+        } catch (e) {
+          dictation.reset();
+          toast.error((e as Error).message);
+        }
+      })();
+    },
+    onError: (msg) => {
+      dictation.reset();
+      toast.error(msg);
+    },
+  });
 
   useEffect(() => {
     setWebSearch(!!webSearchDefault);
@@ -210,6 +238,35 @@ export function Composer({ onSend, onStop, isStreaming, model, webSearchDefault,
                   <Button
                     variant="ghost"
                     size="sm"
+                    className={cn(
+                      'size-8 p-0',
+                      dictation.isRecording ? 'text-red-500' : 'text-muted-foreground'
+                    )}
+                    onClick={() => (dictation.isRecording ? dictation.stop() : void dictation.start())}
+                    disabled={isStreaming || dictation.state === 'processing' || dictation.state === 'requesting'}
+                    aria-label={dictation.isRecording ? 'Stop recording' : 'Dictate message'}
+                    aria-pressed={dictation.isRecording}
+                  >
+                    {dictation.state === 'processing' || dictation.state === 'requesting' ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : dictation.isRecording ? (
+                      <MicOff className="size-4" />
+                    ) : (
+                      <Mic className="size-4" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {dictation.isRecording
+                    ? `Stop recording (${dictation.elapsedSec}s)`
+                    : 'Dictate with your microphone'}
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     className={cn('h-8 gap-1.5 px-2 text-xs', webSearch ? 'text-primary' : 'text-muted-foreground')}
                     onClick={() => setWebSearch((v) => !v)}
                     disabled={isStreaming}
@@ -244,7 +301,9 @@ export function Composer({ onSend, onStop, isStreaming, model, webSearchDefault,
           </div>
         </div>
         <p className="mt-1.5 text-center text-[11px] text-muted-foreground">
-          Enter to send · Shift+Enter for a new line · EmorAI can make mistakes
+          {dictation.isRecording
+            ? `Recording… ${dictation.elapsedSec}s — tap the mic to transcribe`
+            : 'Enter to send · Shift+Enter for a new line · EmorAI can make mistakes'}
         </p>
       </div>
     </div>

@@ -65,7 +65,9 @@ export function proxy(req: NextRequest) {
 
   const res = NextResponse.next();
   res.headers.set('X-Content-Type-Options', 'nosniff');
-  res.headers.set('X-Frame-Options', 'DENY');
+  // SAMEORIGIN (not DENY) so the Agent Studio can frame artifact previews
+  // served from /api/artifacts/[id]/preview on this same origin.
+  res.headers.set('X-Frame-Options', 'SAMEORIGIN');
   res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   return res;
 }

@@ -155,3 +155,33 @@ model FileMetadata {
   extractedText  String?
   createdAt      DateTime @default(now())
 }
+
+// ─── Artifacts (Agent + Studio generated content) ───────────────────────────
+
+model Artifact {
+  id          String   @id @default(cuid())
+  // website | blog | webapp | document | image | video | audio
+  kind        String
+  title       String
+  description String   @default("")
+  prompt      String?
+  modelId     String?
+  // pending | processing | ready | failed
+  status      String   @default("ready")
+  // multi-file outputs (websites/blogs/webapps): [{ path, content, entry }]
+  files       Json?
+  // single binary/text output stored at db/uploads/<artifact id>
+  storagePath String?
+  mime        String?
+  size        Int?
+  // provider async task id (video generation)
+  providerTaskId String?
+  error       String?
+  // flexible extras: { size, voice, speed, format, quality, duration, withAudio }
+  meta        Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([kind, createdAt])
+  @@index([status])
+}

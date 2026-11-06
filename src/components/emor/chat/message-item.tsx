@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from 'react';
-import { AlertTriangle, Brain, Check, ChevronDown, Copy, ExternalLink, FileText, Pencil, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, Brain, Check, ChevronDown, Copy, ExternalLink, FileText, Loader2, Pencil, RefreshCw, Square, Volume2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Markdown } from './markdown';
 import { EmorLogo } from '../logo';
+import { useSpeech } from '@/hooks/use-speech';
 import type { MessageAttachment, SerializedMessage, WebSource } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -124,6 +125,17 @@ export function MessageItem({
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
   const isUser = message.role === 'user';
+  const speech = useSpeech();
+
+  const readAloud = () => {
+    if (speech.isBusy && speech.speakingId === message.id) {
+      speech.stop();
+      return;
+    }
+    void speech.speak(message.id, message.content).catch((e) => {
+      console.error('Read-aloud failed:', e);
+    });
+  };
 
   const copy = async () => {
     try {
@@ -255,6 +267,20 @@ export function MessageItem({
           {!isError && (
             <ActionButton onClick={copy} label="Copy">
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </ActionButton>
+          )}
+          {!isError && message.content.trim().length > 0 && (
+            <ActionButton
+              onClick={readAloud}
+              label={speech.speakingId === message.id && speech.isBusy ? 'Stop reading' : 'Read aloud'}
+            >
+              {speech.speakingId === message.id && speech.state === 'loading' ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : speech.speakingId === message.id && speech.state === 'playing' ? (
+                <Square className="size-3.5 fill-current text-primary" />
+              ) : (
+                <Volume2 className="size-3.5" />
+              )}
             </ActionButton>
           )}
           {isLastAssistant && onRegenerate && (

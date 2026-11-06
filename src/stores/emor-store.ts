@@ -31,6 +31,8 @@ type EmorStore = {
   dialog: DialogKind;
   dialogTab: string | null;
   streaming: StreamingState | null;
+  // Top-level workspace view: chat | studio | agents | developer
+  view: 'chat' | 'studio' | 'agents' | 'developer';
 
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
@@ -39,6 +41,7 @@ type EmorStore = {
   setDraftModelId: (id: string | null) => void;
   openDialog: (kind: Exclude<DialogKind, null>, tab?: string) => void;
   closeDialog: () => void;
+  setView: (view: EmorStore['view']) => void;
   startStreaming: (state: Pick<StreamingState, 'conversationId' | 'mode'> & Partial<StreamingState>) => void;
   updateStreaming: (patch: Partial<StreamingState>) => void;
   appendDelta: (content: string) => void;
@@ -55,6 +58,7 @@ export const useEmorStore = create<EmorStore>((set) => ({
   dialog: null,
   dialogTab: null,
   streaming: null,
+  view: 'chat',
 
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -63,6 +67,7 @@ export const useEmorStore = create<EmorStore>((set) => ({
   setDraftModelId: (id) => set({ draftModelId: id }),
   openDialog: (kind, tab) => set({ dialog: kind, dialogTab: tab ?? null }),
   closeDialog: () => set({ dialog: null, dialogTab: null }),
+  setView: (view) => set({ view }),
 
   startStreaming: (state) =>
     set({

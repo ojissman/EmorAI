@@ -7,15 +7,19 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import {
   BarChart3,
   BookOpen,
+  Bot,
   FileText,
   KeyRound,
   Menu,
+  MessageSquare,
   MoreVertical,
   PanelLeft,
   Settings,
   Sun,
   Moon,
   MonitorSmartphone,
+  Sparkles,
+  Code2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -24,6 +28,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Sidebar, MobileSidebar } from './sidebar/sidebar';
@@ -34,6 +39,10 @@ import { KeysDialog } from './dialogs/keys-dialog';
 import { DocsDialog } from './dialogs/docs-dialog';
 import { UsageDialog } from './dialogs/usage-dialog';
 import { SummaryDialog } from './dialogs/summary-dialog';
+import { MediaStudio } from './studio/media-studio';
+import { AgentStudio } from './agents/agent-studio';
+import { DeveloperHub } from './developer/developer-hub';
+import { VoiceModeDialog } from './chat/voice-mode';
 import { useEmorStore } from '@/stores/emor-store';
 import { useConversations, useModels, useSettings } from '@/hooks/use-emor-queries';
 import { api } from '@/lib/api-client';
@@ -80,16 +89,60 @@ function ThemeToggleButton() {
   );
 }
 
+type WorkspaceView = 'chat' | 'studio' | 'agents' | 'developer';
+
+const VIEW_META: Record<WorkspaceView, { label: string; icon: typeof MessageSquare }> = {
+  chat: { label: 'Chat', icon: MessageSquare },
+  studio: { label: 'Studio', icon: Sparkles },
+  agents: { label: 'Agents', icon: Bot },
+  developer: { label: 'Developer', icon: Code2 },
+};
+
+function ViewSwitcher() {
+  const view = useEmorStore((s) => s.view);
+  const setView = useEmorStore((s) => s.setView);
+  return (
+    <div
+      role="tablist"
+      aria-label="Workspace views"
+      className="hidden items-center gap-0.5 rounded-lg border bg-muted/40 p-0.5 md:flex"
+    >
+      {(Object.keys(VIEW_META) as WorkspaceView[]).map((v) => {
+        const Icon = VIEW_META[v].icon;
+        const active = view === v;
+        return (
+          <button
+            key={v}
+            role="tab"
+            aria-selected={active}
+            onClick={() => setView(v)}
+            className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors ${
+              active
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Icon className="size-3.5" />
+            {VIEW_META[v].label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function DashboardHeader({
   title,
   selectedModel,
   onModelChange,
   onOpenMobileSidebar,
+  view,
 }: {
   title: string;
   selectedModel: ModelInfo | null;
   onModelChange: (id: string) => void;
   onOpenMobileSidebar: () => void;
+  view: WorkspaceView;
 }) {
   const openDialog = useEmorStore((s) => s.openDialog);
   const toggleSidebar = useEmorStore((s) => s.toggleSidebar);
@@ -111,9 +164,11 @@ function DashboardHeader({
       <Button variant="ghost" size="sm" className="hidden h-8 w-8 p-0 text-muted-foreground md:flex" onClick={toggleSidebar} aria-label="Toggle sidebar">
         <PanelLeft className="size-4" />
       </Button>
-      <ModelSelector selected={selectedModel} onSelect={onModelChange} />
+      <ViewSwitcher />
+      {view === 'chat' && <ModelSelector selected={selectedModel} onSelect={onModelChange} />}
       <span className="hidden min-w-0 flex-1 truncate px-2 text-sm text-muted-foreground sm:block">{title}</span>
       <span className="flex-1 sm:hidden" />
+      <VoiceModeDialog conversationId={activeId} model={selectedModel} />
       <ThemeToggleButton />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -122,6 +177,18 @@ function DashboardHeader({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuSeparator className="md:hidden" />
+          <div className="grid grid-cols-2 gap-1 p-1 md:hidden">
+            {(Object.keys(VIEW_META) as WorkspaceView[]).map((v) => {
+              const Icon = VIEW_META[v].icon;
+              return (
+                <DropdownMenuItem key={v} onClick={() => useEmorStore.getState().setView(v)}>
+                  <Icon className="size-3.5" /> {VIEW_META[v].label}
+                </DropdownMenuItem>
+              );
+            })}
+          </div>
+          <DropdownMenuSeparator className="md:hidden" />
           <DropdownMenuItem onClick={() => openDialog('keys')}>
             <KeyRound className="size-3.5" /> API keys
           </DropdownMenuItem>
@@ -201,6 +268,15 @@ function EmorDashboard() {
   };
 
   const title = activeConversation?.title ?? 'New chat';
+  const view = useEmorStore((s) => s.view);
+  const viewTitle =
+    view === 'studio'
+      ? 'Media Studio — images, video, speech & documents'
+      : view === 'agents'
+        ? 'Agent Studio — describe it, the agent builds it'
+        : view === 'developer'
+          ? 'Developer Hub — build on the EmorAI API'
+          : title;
 
   return (
     <>
@@ -209,16 +285,22 @@ function EmorDashboard() {
         <MobileSidebar />
         <main className="flex min-w-0 flex-1 flex-col">
           <DashboardHeader
-            title={title}
+            title={viewTitle}
             selectedModel={activeModel}
             onModelChange={changeModel}
             onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+            view={view}
           />
-          <ChatArea
-            activeConversationId={activeConversationId}
-            activeModel={activeModel}
-            onModelMissing={() => useEmorStore.getState().openDialog('settings', 'models')}
-          />
+          {view === 'chat' && (
+            <ChatArea
+              activeConversationId={activeConversationId}
+              activeModel={activeModel}
+              onModelMissing={() => useEmorStore.getState().openDialog('settings', 'models')}
+            />
+          )}
+          {view === 'studio' && <MediaStudio />}
+          {view === 'agents' && <AgentStudio />}
+          {view === 'developer' && <DeveloperHub />}
         </main>
       </div>
 
