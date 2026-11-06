@@ -7,6 +7,8 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  // Allow the sandbox preview tunnel domain to fetch dev assets / HMR.
+  allowedDevOrigins: ["*.space-z.ai"],
 };
 
 export default nextConfig;
