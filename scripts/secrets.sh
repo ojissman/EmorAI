@@ -35,11 +35,20 @@ fi
 case "${1:-}" in
   encrypt)
     mkdir -p "$ROOT/secrets"
+    # Normalize modes first so the archive always restores clean:
+    # .env secret-only, db readable, uploads dir traversable.
+    [ -f "$ROOT/.env" ] && chmod 600 "$ROOT/.env" || true
+    [ -f "$ROOT/db/custom.db" ] && chmod 644 "$ROOT/db/custom.db" || true
+    if [ -d "$ROOT/db/uploads" ]; then
+      chmod 755 "$ROOT/db/uploads"
+      find "$ROOT/db/uploads" -type f -exec chmod 644 {} + 2>/dev/null || true
+    fi
     tar -C "$ROOT" -czf "$STAGING/bundle.tar.gz" .env db/custom.db db/uploads
     openssl enc -aes-256-cbc -pbkdf2 -iter "$ITER" -salt \
       -in "$STAGING/bundle.tar.gz" -out "$BUNDLE" \
       -pass env:EMORAI_SECRET_PASSPHRASE
-    chmod 600 "$BUNDLE"
+    # 644 on ciphertext keeps git mode-stable; plaintext never touches disk outside staging.
+    chmod 644 "$BUNDLE"
     echo "Encrypted bundle written: secrets/emorai-secrets.tar.gz.enc"
     ;;
   decrypt)
@@ -48,7 +57,17 @@ case "${1:-}" in
       -in "$BUNDLE" -out "$STAGING/bundle.tar.gz" \
       -pass env:EMORAI_SECRET_PASSPHRASE
     tar -C "$ROOT" -xzf "$STAGING/bundle.tar.gz"
+    # Mode-safe restore: dirs traversable, files private/readable.
+    # (Works even when the caller is root and the archive carries odd modes.)
+    chmod 600 "$ROOT/.env" 2>/dev/null || true
+    chmod 644 "$ROOT/db/custom.db" 2>/dev/null || true
+    if [ -d "$ROOT/db/uploads" ]; then
+      chmod 755 "$ROOT/db/uploads"
+      find "$ROOT/db/uploads" -type f -exec chmod 644 {} + 2>/dev/null || true
+    fi
+    if [ "$(id -u)" = "0" ]; then chown -R z:z "$ROOT/.env" "$ROOT/db" 2>/dev/null || true; fi
     echo "Secrets restored: .env, db/custom.db, db/uploads/"
+    echo "NOTE: restart the dev server (bun run dev) so it opens the restored database."
     ;;
   *)
     echo "Usage: $0 {encrypt|decrypt}" >&2

@@ -56,3 +56,6 @@ server.log
 .env
 db/custom.db
 db/uploads/
+
+# runtime artifacts
+.zscripts/dev.pid
