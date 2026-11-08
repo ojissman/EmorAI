@@ -1,6 +1,7 @@
 import { authenticateV1 } from '@/lib/api/auth';
 import { resolveModel, listEnabledModels } from '@/lib/model-registry';
 import { corsPreflight, corsJson } from '@/lib/api/cors';
+import { recordUsage, requestBodyPreview, modelGuessFromRaw } from '@/lib/usage';
 import { randomId } from '@/lib/api/protocol/openai';
 import {
   anthropicError,
@@ -40,12 +41,20 @@ export async function POST(req: Request) {
   // count_tokens accepts the same body shape as /v1/messages (stream ignored)
   const parsed = anthropicBodySchema.safeParse(raw);
   if (!parsed.success) {
-    return anthropicError(
-      400,
-      'invalid_request_error',
-      `Invalid request: ${parsed.error.issues[0]?.message ?? 'malformed body'}`,
-      authHeaders
-    );
+    const issue = parsed.error.issues[0];
+    const message = `Invalid request: ${issue?.path.join('.') || 'body'} — ${issue?.message ?? 'malformed body'}`;
+    void recordUsage({
+      source: 'api',
+      protocol: 'anthropic',
+      endpoint: ENDPOINT,
+      statusCode: 400,
+      requestId,
+      apiKeyId: key.apiKeyId,
+      modelId: modelGuessFromRaw(raw),
+      success: false,
+      errorText: `${message} | body: ${requestBodyPreview(raw)}`,
+    }).catch(() => undefined);
+    return anthropicError(400, 'invalid_request_error', message, authHeaders);
   }
   const body = parsed.data;
 

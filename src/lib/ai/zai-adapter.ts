@@ -1,6 +1,7 @@
 import ZAI from 'z-ai-web-dev-sdk';
 import { parseUpstreamSSE, sseDone, sseEvent } from '@/lib/ai/sse';
 import { sanitizeToolsForProvider, translateToolChoiceName, type SanitizedTools } from '@/lib/ai/provider-tool-limits';
+import { finalizeProviderMessages } from '@/lib/api/protocol/roles';
 import type { ProviderMessage, ProviderTool, ProviderToolCall, TokenUsage, WebSource } from '@/lib/types';
 
 // ─── Provider errors ─────────────────────────────────────────────────────────
@@ -138,8 +139,13 @@ function restoreToolName(name: string, toolSafe: SanitizedTools | null): string 
 }
 
 function buildBody(opts: StreamChatOptions, stream: boolean, toolSafe: SanitizedTools | null = null): Record<string, unknown> {
+  // Last line of defense before the upstream: guarantee the provider's message
+  // invariants (single leading system message, no mid-conversation system
+  // roles, no consecutive same-role user/assistant messages, no empty
+  // messages) no matter which internal caller built the array.
+  const messages = finalizeProviderMessages(opts.messages);
   const body: Record<string, unknown> = {
-    messages: opts.messages,
+    messages,
     stream,
     thinking: { type: opts.thinkingEnabled ? 'enabled' : 'disabled' },
   };
@@ -370,7 +376,7 @@ export async function completeVision(opts: {
   throwIfAborted();
   const zai = await ZAI.create();
   const body: Record<string, unknown> = {
-    messages: opts.messages,
+    messages: finalizeProviderMessages(opts.messages),
     thinking: { type: 'disabled' },
   };
   if (opts.modelId) body.model = opts.modelId;

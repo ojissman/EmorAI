@@ -2,7 +2,7 @@ import { db } from '@/lib/db';
 import { authenticateV1 } from '@/lib/api/auth';
 import { resolveModel, listEnabledModels } from '@/lib/model-registry';
 import { getSettings } from '@/lib/settings';
-import { recordUsage, estimateUsage } from '@/lib/usage';
+import { recordUsage, estimateUsage, requestBodyPreview, modelGuessFromRaw } from '@/lib/usage';
 import { ProviderError, streamChat, completeChat } from '@/lib/ai/zai-adapter';
 import { SSE_HEADERS } from '@/lib/ai/sse';
 import { corsPreflight } from '@/lib/api/cors';
@@ -68,12 +68,23 @@ export async function POST(req: Request) {
   }
   const parsed = anthropicBodySchema.safeParse(raw);
   if (!parsed.success) {
-    return anthropicError(
-      400,
-      'invalid_request_error',
-      `Invalid request: ${parsed.error.issues[0]?.path.join('.') || 'body'} — ${parsed.error.issues[0]?.message ?? 'malformed body'}`,
-      authHeaders
-    );
+    const issue = parsed.error.issues[0];
+    const message = `Invalid request: ${issue?.path.join('.') || 'body'} — ${issue?.message ?? 'malformed body'}`;
+    // Schema rejections are logged with a body preview so client-compatibility
+    // issues (like ZCode's leaked roles) are diagnosable from the dashboard —
+    // previously these failures left no trace at all.
+    void recordUsage({
+      source: 'api',
+      protocol: 'anthropic',
+      endpoint,
+      statusCode: 400,
+      requestId,
+      apiKeyId: key.apiKeyId,
+      modelId: modelGuessFromRaw(raw),
+      success: false,
+      errorText: `${message} | body: ${requestBodyPreview(raw)}`,
+    }).catch(() => undefined);
+    return anthropicError(400, 'invalid_request_error', message, authHeaders);
   }
   const body = parsed.data;
 

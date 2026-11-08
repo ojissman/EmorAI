@@ -19,6 +19,7 @@ import type { AuthenticatedKey } from '@/lib/api/auth';
 import { corsJson } from '@/lib/api/cors';
 import type { ProviderContentPart, ProviderMessage, ProviderTool, ProviderToolCall, TokenUsage } from '@/lib/types';
 import type { StreamEvent, ToolCallDelta } from '@/lib/ai/zai-adapter';
+import { normalizeChatRole, finalizeProviderMessages } from '@/lib/api/protocol/roles';
 
 // ─── Error envelope ──────────────────────────────────────────────────────────
 
@@ -90,11 +91,36 @@ export const anthropicContentBlockSchema = z.union([
   z.object({ type: z.literal('document'), source: z.unknown() }),
   z.object({ type: z.literal('thinking'), thinking: z.string().optional(), signature: z.string().optional() }),
   z.object({ type: z.literal('redacted_thinking'), data: z.string().optional() }),
+  // Liberal fallback: unknown block types (server tool blocks, future Anthropic
+  // extensions…) pass validation and are dropped during translation instead of
+  // rejecting the whole request at the door.
+  z.object({ type: z.string() }).passthrough(),
 ]);
 
+// OpenAI-style tool_calls that some Anthropic-format clients leak into
+// assistant messages (mixed SDKs, protocol adapters).
+export const anthropicToolCallLeakSchema = z.object({
+  id: z.string().optional(),
+  type: z.literal('function').optional(),
+  function: z.object({
+    name: z.string().min(1).max(128),
+    arguments: z.string().optional(),
+  }),
+});
+
 export const anthropicMessageSchema = z.object({
-  role: z.enum(['user', 'assistant']),
+  // Liberal role acceptance. Strict Anthropic only allows "user"|"assistant"
+  // here, but real-world agents (ZCode, OpenClaw, mixed SDKs…) leak
+  // system/developer/tool/function roles into the messages array. Any role
+  // string is accepted and normalized during translation; rejecting here just
+  // breaks agents at the door (this is exactly what produced the
+  // `messages.1.role — Invalid option` failures from ZCode).
+  role: z.string().min(1).max(32),
   content: z.union([z.string().max(400_000), z.array(anthropicContentBlockSchema).max(128)]),
+  // OpenAI-style fields tolerated on Anthropic messages:
+  name: z.string().max(128).optional(),
+  tool_call_id: z.string().max(128).optional(),
+  tool_calls: z.array(anthropicToolCallLeakSchema).max(32).optional(),
 });
 
 export const anthropicToolSchema = z.object({
@@ -183,13 +209,17 @@ function toolResultToText(block: Extract<RawBlock, { type: 'tool_result' }>): st
 }
 
 function imageSourceToPart(block: Extract<RawBlock, { type: 'image' }>): ProviderContentPart {
-  const source = block.source;
-  if (source.type === 'url') {
+  const source = block.source as { type?: string; url?: string; media_type?: string; data?: string } | undefined;
+  if (source?.type === 'url' && typeof source.url === 'string') {
     return { type: 'image_url', image_url: { url: source.url } };
   }
-  // Anthropic base64 image → OpenAI-style data URI
-  const mediaType = source.media_type || 'image/png';
-  return { type: 'image_url', image_url: { url: `data:${mediaType};base64,${source.data}` } };
+  if (source?.type === 'base64' && typeof source.data === 'string') {
+    // Anthropic base64 image → OpenAI-style data URI
+    const mediaType = source.media_type || 'image/png';
+    return { type: 'image_url', image_url: { url: `data:${mediaType};base64,${source.data}` } };
+  }
+  // Malformed image block (passed the liberal fallback branch) — degrade to text
+  return { type: 'text', text: '[invalid image block]' };
 }
 
 function documentToText(block: Extract<RawBlock, { type: 'document' }>): string {
@@ -203,13 +233,20 @@ function documentToText(block: Extract<RawBlock, { type: 'document' }>): string 
   );
 }
 
+/** Text of a message whose content is a string or an Anthropic block array. */
+function contentToText(content: string | AnthropicContentBlock[]): string {
+  if (typeof content === 'string') return content;
+  return joinText(content);
+}
+
 /**
- * Translates one Anthropic message (string or block array) into one or more
- * provider messages. Tool results become individual `tool` messages; text and
- * images stay in `user`/`assistant` messages; thinking blocks are accepted
- * and dropped (the provider does not replay reasoning in history).
+ * Translates one normalized user/assistant message (string or block array)
+ * into one or more provider messages. Tool results become individual `tool`
+ * messages; text and images stay in `user`/`assistant` messages; thinking
+ * blocks are accepted and dropped (the provider does not replay reasoning in
+ * history).
  */
-function translateMessage(msg: z.infer<typeof anthropicMessageSchema>): ProviderMessage[] {
+function translateMessage(msg: { role: 'user' | 'assistant'; content: string | AnthropicContentBlock[] }): ProviderMessage[] {
   if (typeof msg.content === 'string') {
     return [{ role: msg.role, content: msg.content }];
   }
@@ -320,16 +357,56 @@ export function anthropicToProvider(
   if (body.messages.length === 0) {
     throw new ProtocolTranslationError('messages: at least one message is required.');
   }
-  const first = body.messages[0];
-  if (first.role !== 'user') {
-    throw new ProtocolTranslationError('messages: first message must have role "user" (Anthropic protocol).');
+
+  // Liberal role handling: normalize each message role first, then translate.
+  // system/developer roles merge into the system prompt; tool/function roles
+  // become provider tool messages; OpenAI-style tool_calls on assistant
+  // messages are honored. finalizeProviderMessages() then enforces the
+  // upstream invariants (single leading system message, no consecutive
+  // same-role messages, no empty messages).
+  const providerMessages: ProviderMessage[] = [];
+  const systemParts: string[] = [];
+  const topSystem = translateSystem(body.system);
+  if (topSystem) systemParts.push(topSystem);
+
+  for (const msg of body.messages) {
+    const role = normalizeChatRole(msg.role);
+    if (role === 'system') {
+      const text = contentToText(msg.content);
+      if (text.trim().length > 0) systemParts.push(text);
+      continue;
+    }
+    if (role === 'tool') {
+      // OpenAI-style tool result leaked into the Anthropic messages array
+      const text = contentToText(msg.content);
+      providerMessages.push({
+        role: 'tool',
+        content: text.trim().length > 0 ? text : '(empty tool result)',
+        tool_call_id: msg.tool_call_id ?? msg.name ?? `call_${providerMessages.length}`,
+      });
+      continue;
+    }
+    if (role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      // OpenAI-style assistant tool_calls leak
+      providerMessages.push({
+        role: 'assistant',
+        content: contentToText(msg.content),
+        tool_calls: msg.tool_calls.map((tc, i) => ({
+          id: tc.id && tc.id.length > 0 ? tc.id : `call_${Date.now().toString(36)}_${i}`,
+          type: 'function' as const,
+          function: { name: tc.function.name, arguments: tc.function.arguments ?? '{}' },
+        })),
+      });
+      continue;
+    }
+    providerMessages.push(...translateMessage({ role, content: msg.content }));
   }
 
-  const providerMessages: ProviderMessage[] = [];
-  const system = translateSystem(body.system);
-  if (system) providerMessages.push({ role: 'system', content: system });
-  for (const msg of body.messages) {
-    providerMessages.push(...translateMessage(msg));
+  const messages = finalizeProviderMessages(
+    systemParts.length > 0 ? [{ role: 'system', content: systemParts.join('\n\n') }, ...providerMessages] : providerMessages
+  );
+  if (messages.length === 0 || messages.every((m) => m.role === 'system')) {
+    throw new ProtocolTranslationError('messages: the request contains no user or assistant content.');
   }
 
   // Anthropic marks max_tokens optional in newer drafts but the classic API
@@ -338,7 +415,7 @@ export function anthropicToProvider(
   const maxTokens = Math.min(requestedMax, opts.modelMaxOutputTokens ?? requestedMax);
 
   return {
-    messages: providerMessages,
+    messages,
     tools: translateTools(body.tools),
     toolChoice: translateToolChoice(body.tool_choice),
     maxTokens,

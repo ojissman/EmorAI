@@ -57,7 +57,11 @@ export const toolCallSchema = z.object({
 });
 
 export const chatMessageSchema = z.object({
-  role: z.enum(['system', 'user', 'assistant', 'tool', 'developer']),
+  // Liberal role acceptance: any role string is validated here and normalized
+  // during translation (see lib/api/protocol/roles.ts). Covers system, user,
+  // assistant, tool, developer, legacy function, and unknown-but-harmless
+  // variants that real-world clients send.
+  role: z.string().min(1).max(32),
   content: z.union([z.string().max(400_000), z.array(contentPartSchema).max(64), z.null()]),
   name: z.string().max(128).optional(),
   tool_calls: z.array(toolCallSchema).max(32).optional(),

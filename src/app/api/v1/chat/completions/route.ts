@@ -3,7 +3,7 @@ import { db } from '@/lib/db';
 import { authenticateV1, scopeFailure, modelAllowFailure } from '@/lib/api/auth';
 import { resolveModel, listEnabledModels } from '@/lib/model-registry';
 import { getSettings } from '@/lib/settings';
-import { recordUsage, estimateUsage } from '@/lib/usage';
+import { recordUsage, estimateUsage, requestBodyPreview, modelGuessFromRaw } from '@/lib/usage';
 import { ProviderError, streamChat, completeChat } from '@/lib/ai/zai-adapter';
 import { SSE_HEADERS, sseDone, sseEvent } from '@/lib/ai/sse';
 import { corsPreflight, corsJson } from '@/lib/api/cors';
@@ -16,6 +16,7 @@ import {
   toOpenAiFinishReason,
 } from '@/lib/api/protocol/openai';
 import type { ProviderContentPart, ProviderMessage, ProviderTool, ProviderToolCall } from '@/lib/types';
+import { normalizeChatRole, finalizeProviderMessages } from '@/lib/api/protocol/roles';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -47,12 +48,14 @@ function toProviderMessages(
 ): ProviderMessage[] {
   const out: ProviderMessage[] = [];
   for (const m of messages) {
-    const role: ProviderMessage['role'] = m.role === 'developer' ? 'system' : m.role;
+    // Liberal role normalization — see lib/api/protocol/roles.ts
+    const role = normalizeChatRole(m.role);
     if (role === 'tool') {
-      if (!m.tool_call_id) {
+      const toolCallId = m.tool_call_id ?? m.name;
+      if (!toolCallId) {
         throw new ProviderError('bad_request', 'Messages with role "tool" require a tool_call_id.', { status: 400 });
       }
-      out.push({ role: 'tool', content: textOf(m.content), tool_call_id: m.tool_call_id });
+      out.push({ role: 'tool', content: textOf(m.content), tool_call_id: toolCallId });
     } else if (role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
       const toolCalls: ProviderToolCall[] = m.tool_calls.map((tc, i) => ({
         id: tc.id && tc.id.length > 0 ? tc.id : `call_${Date.now().toString(36)}_${i}`,
@@ -74,7 +77,10 @@ function toProviderMessages(
       out.push({ role, content: textOf(m.content) });
     }
   }
-  return out;
+  // Enforce upstream invariants: single leading system message (mid-conversation
+  // system content is hoisted), merged consecutive same-role messages, no
+  // empty non-tool messages.
+  return finalizeProviderMessages(out);
 }
 
 function toProviderTools(
@@ -125,14 +131,22 @@ export async function POST(req: Request) {
   }
   const parsed = chatCompletionsBodySchema.safeParse(raw);
   if (!parsed.success) {
-    return openAiError(
-      400,
-      'invalid_request',
-      `Invalid request payload: ${parsed.error.issues[0]?.message ?? 'malformed body'}`,
-      'invalid_request_error',
-      undefined,
-      authHeaders
-    );
+    const issue = parsed.error.issues[0];
+    const message = `Invalid request payload: ${issue?.path.join('.') || 'body'} — ${issue?.message ?? 'malformed body'}`;
+    // Schema rejections are logged with a body preview so client-compatibility
+    // issues are diagnosable from the dashboard.
+    void recordUsage({
+      source: 'api',
+      protocol: 'openai',
+      endpoint,
+      statusCode: 400,
+      requestId,
+      apiKeyId: key.apiKeyId,
+      modelId: modelGuessFromRaw(raw),
+      success: false,
+      errorText: `${message} | body: ${requestBodyPreview(raw)}`,
+    }).catch(() => undefined);
+    return openAiError(400, 'invalid_request', message, 'invalid_request_error', undefined, authHeaders);
   }
   const body = parsed.data;
 

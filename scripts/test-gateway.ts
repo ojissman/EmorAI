@@ -11,10 +11,13 @@
  *   7.  POST /v1/messages (Anthropic, streaming SSE events)
  *   8.  POST /v1/messages with tools (tool_use blocks)
  *   9.  Anthropic system + multi-turn + tool_result round-trip
- *   10. POST /v1/messages/count_tokens
- *   11. unknown model → 404 with model list
- *   12. scope enforcement (key without "tools")
- *   13. model allowlist enforcement
+ *   10. Coding-agent liberal payloads: leaked roles (system/tool/function),
+ *       OpenAI-style tool_calls in Anthropic format, mid-conversation system
+ *       (regression: ZCode sent role "system" at messages[1] and was rejected)
+ *   11. POST /v1/messages/count_tokens
+ *   12. unknown model → 404 with model list
+ *   13. scope enforcement (key without "tools")
+ *   14. model allowlist enforcement
  *
  * Run: bun run scripts/test-gateway.ts
  * (Spaced to respect upstream rate limits — takes a few minutes.)
@@ -469,6 +472,112 @@ async function main() {
       r.status === 200 && /18|cloud/i.test(text)
         ? ok('tool_result consumed, assistant answered from tool output', text.slice(0, 70))
         : bad('tool_result round-trip', `status ${r.status} ${JSON.stringify(r.body).slice(0, 250)}`);
+    }
+
+    // ─── 9b. Coding-agent liberal payloads (ZCode regression) ───────────
+    section('Coding-agent compatibility: liberal roles & leaked shapes');
+    {
+      // Regression: ZCode sent a system-role message inside the Anthropic
+      // messages array (messages[1].role = "system") and the gateway rejected
+      // it with `Invalid option: expected one of "user"|"assistant"`.
+      // Now: accepted, hoisted into the system prompt, request succeeds.
+      await sleep(9000);
+      const r = await json('POST', '/api/v1/messages', full.plaintext, {
+        model: 'glm-5.3-flash',
+        max_tokens: 60,
+        system: 'Reply with exactly the requested text and nothing else.',
+        messages: [
+          { role: 'user', content: 'Reply with exactly: ZCODE ROLE OK' },
+          { role: 'system', content: 'Environment: linux, cwd: /tmp, shell: bash' },
+        ],
+      }, { 'x-api-key': full.plaintext });
+      const text = r.body?.content?.find((b: any) => b.type === 'text')?.text ?? '';
+      r.status === 200 && text.includes('ZCODE ROLE OK')
+        ? ok('Anthropic: system-role message inside messages[] accepted (hoisted to system prompt)')
+        : bad('leaked system role (anthropic)', `status ${r.status} ${JSON.stringify(r.body).slice(0, 220)}`);
+
+      // Full ZCode-shaped streaming request: big top-level system + leaked
+      // system-role message + tools with an oversized description.
+      const longDesc = 'Reads a file from the filesystem with detailed behavior notes, edge cases and safety constraints for coding agents. '.repeat(40); // > 6000 chars
+      await sleep(9000);
+      const r2 = await sse('/api/v1/messages', full.plaintext, {
+        model: 'glm-5.3-flash',
+        max_tokens: 300,
+        stream: true,
+        system: 'You are a coding agent. Always use tools when asked to read files.',
+        messages: [
+          { role: 'user', content: 'Read the file /tmp/app.ts.' },
+          { role: 'system', content: '<environment>cwd: /tmp, platform: linux</environment>' },
+        ],
+        tools: [
+          {
+            name: 'read_file',
+            description: longDesc,
+            input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+          },
+        ],
+      }, { 'x-api-key': full.plaintext });
+      const toolUseStreamed = r2.raw.includes('"type":"tool_use"') && r2.raw.includes('"input_json_delta"');
+      r2.status === 200 && toolUseStreamed
+        ? ok('Anthropic: full ZCode shape (system leak + oversized tool) streams tool_use')
+        : bad('zcode-shaped stream', `status ${r2.status} toolUse=${toolUseStreamed} raw=${r2.raw.slice(0, 160)}`);
+
+      // OpenAI-style leak INSIDE Anthropic format: assistant message with
+      // tool_calls + tool-role message with tool_call_id (mixed SDKs do this).
+      await sleep(9000);
+      const r3 = await json('POST', '/api/v1/messages', full.plaintext, {
+        model: 'glm-5.3-flash',
+        max_tokens: 300,
+        messages: [
+          { role: 'user', content: 'What is the weather in Paris?' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              { id: 'call_leak_1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Paris"}' } },
+            ],
+          },
+          { role: 'tool', tool_call_id: 'call_leak_1', content: '18°C and cloudy' },
+        ],
+        tools: [
+          {
+            name: 'get_weather',
+            description: 'Get weather for a city',
+            input_schema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+          },
+        ],
+      }, { 'x-api-key': full.plaintext });
+      const text3 = (r3.body?.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
+      r3.status === 200 && /18|cloud/i.test(text3)
+        ? ok('Anthropic: OpenAI-style tool_calls/tool-role leak round-trips')
+        : bad('openai-shape leak (anthropic)', `status ${r3.status} ${JSON.stringify(r3.body).slice(0, 220)}`);
+
+      // OpenAI path: mid-conversation system role must be hoisted, not rejected.
+      await sleep(9000);
+      const r4 = await json('POST', '/api/v1/chat/completions', full.plaintext, {
+        model: 'glm-5.3-flash',
+        max_tokens: 60,
+        messages: [
+          { role: 'user', content: 'Reply with exactly: OPENAI SYS HOIST OK' },
+          { role: 'system', content: 'Reply with exactly what the user asked for.' },
+        ],
+      });
+      const text4 = r4.body?.choices?.[0]?.message?.content ?? '';
+      r4.status === 200 && text4.includes('OPENAI SYS HOIST OK')
+        ? ok('OpenAI: mid-conversation system role hoisted to leading system message')
+        : bad('system hoist (openai)', `status ${r4.status} ${JSON.stringify(r4.body).slice(0, 220)}`);
+
+      // count_tokens accepts liberal roles too (no upstream call → no sleep).
+      const rc = await json('POST', '/api/v1/messages/count_tokens', full.plaintext, {
+        model: 'glm-5.3-flash',
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'system', content: 'env context' },
+        ],
+      }, { 'x-api-key': full.plaintext });
+      rc.status === 200 && typeof rc.body?.input_tokens === 'number' && rc.body.input_tokens > 3
+        ? ok('count_tokens accepts liberal roles', `input_tokens=${rc.body.input_tokens}`)
+        : bad('count_tokens liberal roles', `status ${rc.status} ${JSON.stringify(rc.body).slice(0, 160)}`);
     }
 
     // ─── 10. count_tokens ─────────────────────────────────────────────────

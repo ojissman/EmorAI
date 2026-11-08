@@ -80,6 +80,22 @@ export function estimateUsage(
   return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
 }
 
+/** Compact one-line preview of a request body, for validation-error logs. */
+export function requestBodyPreview(raw: unknown, maxChars = 480): string {
+  try {
+    const s = JSON.stringify(raw) ?? '';
+    return s.replace(/\s+/g, ' ').slice(0, maxChars);
+  } catch {
+    return '(unserializable body)';
+  }
+}
+
+/** Best-effort model name extracted from an unvalidated request body. */
+export function modelGuessFromRaw(raw: unknown): string {
+  const m = (raw as { model?: unknown } | null | undefined)?.model;
+  return typeof m === 'string' && m.length > 0 ? m.slice(0, 160) : 'unknown';
+}
+
 /** First moment of the current calendar month (UTC) — for monthly limits. */
 export function monthStart(now = new Date()): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
