@@ -9,7 +9,7 @@ export function serializeArtifact(a: Artifact, opts?: { includeFiles?: boolean }
   const files = opts?.includeFiles ? (a.files as ArtifactFile[] | null) : undefined;
   return {
     id: a.id,
-    kind: a.kind,
+    kind: a.kind as ArtifactKind,
     title: a.title,
     description: a.description,
     prompt: a.prompt,

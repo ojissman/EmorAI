@@ -11,7 +11,7 @@ import { Composer } from './composer';
 import { useEmorStore } from '@/stores/emor-store';
 import { useChatStream } from '@/hooks/use-chat-stream';
 import { useConversationMessages, useModels } from '@/hooks/use-emor-queries';
-import type { ModelInfo, SerializedMessage } from '@/lib/types';
+import type { ModelInfo, SerializedMessage, MessageAttachment } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 function StreamingAssistantBubble({

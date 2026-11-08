@@ -72,7 +72,10 @@ export const anthropicImageSourceSchema = z.union([
   z.object({ type: z.literal('url'), url: z.string() }),
 ]);
 
-export const anthropicContentBlockSchema = z.union([
+// Strict block members — the known Anthropic content block shapes. Kept as
+// an array so both the strict type view and the liberal parse union below
+// derive from one source of truth.
+const strictContentBlockSchemas = [
   z.object({ type: z.literal('text'), text: z.string(), cache_control: z.unknown().optional() }),
   z.object({ type: z.literal('image'), source: anthropicImageSourceSchema }),
   z.object({
@@ -91,11 +94,38 @@ export const anthropicContentBlockSchema = z.union([
   z.object({ type: z.literal('document'), source: z.unknown() }),
   z.object({ type: z.literal('thinking'), thinking: z.string().optional(), signature: z.string().optional() }),
   z.object({ type: z.literal('redacted_thinking'), data: z.string().optional() }),
+] as const;
+
+/** Strictly-typed view of the known content blocks (discriminated by `type`). */
+export type StrictContentBlock = z.infer<(typeof strictContentBlockSchemas)[number]>;
+
+export const anthropicContentBlockSchema = z.union([
+  ...strictContentBlockSchemas,
   // Liberal fallback: unknown block types (server tool blocks, future Anthropic
   // extensions…) pass validation and are dropped during translation instead of
   // rejecting the whole request at the door.
   z.object({ type: z.string() }).passthrough(),
 ]);
+
+const KNOWN_BLOCK_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'image',
+  'tool_use',
+  'tool_result',
+  'document',
+  'thinking',
+  'redacted_thinking',
+]);
+
+/**
+ * Narrows a liberally-parsed block to the strict union by its `type` tag.
+ * Fallback-matched blocks that carry a known tag but miss required fields are
+ * still included — translation defends against the missing fields at the
+ * access sites, so no tool result is silently dropped.
+ */
+function isKnownBlock(b: AnthropicContentBlock): b is StrictContentBlock {
+  return KNOWN_BLOCK_TYPES.has(b.type);
+}
 
 // OpenAI-style tool_calls that some Anthropic-format clients leak into
 // assistant messages (mixed SDKs, protocol adapters).
@@ -173,7 +203,7 @@ export class ProtocolTranslationError extends Error {
   }
 }
 
-type RawBlock = AnthropicContentBlock;
+type RawBlock = StrictContentBlock;
 
 function joinText(blocks: RawBlock[]): string {
   return blocks
@@ -188,7 +218,8 @@ function toolResultToText(block: Extract<RawBlock, { type: 'tool_result' }>): st
     text = block.content;
   } else if (Array.isArray(block.content)) {
     const parts = block.content.map((p) => {
-      if (typeof (p as { text?: unknown }).text === 'string') return (p as { text: string }).text;
+      const t = (p as { text?: unknown }).text;
+      if (typeof t === 'string') return t;
       if ((p as { type?: string }).type === 'image') {
         throw new ProtocolTranslationError(
           'Images inside tool_result blocks are not supported by the underlying provider. Return tool results as text.',
@@ -236,7 +267,7 @@ function documentToText(block: Extract<RawBlock, { type: 'document' }>): string 
 /** Text of a message whose content is a string or an Anthropic block array. */
 function contentToText(content: string | AnthropicContentBlock[]): string {
   if (typeof content === 'string') return content;
-  return joinText(content);
+  return joinText(content.filter(isKnownBlock));
 }
 
 /**
@@ -250,17 +281,19 @@ function translateMessage(msg: { role: 'user' | 'assistant'; content: string | A
   if (typeof msg.content === 'string') {
     return [{ role: msg.role, content: msg.content }];
   }
-  const blocks = msg.content;
+  // Liberal parse → strict union: unknown block types are dropped here.
+  const blocks = msg.content.filter(isKnownBlock);
 
   if (msg.role === 'assistant') {
     const text = joinText(blocks);
     const toolUses = blocks.filter((b): b is Extract<RawBlock, { type: 'tool_use' }> => b.type === 'tool_use');
     if (toolUses.length > 0) {
-      const toolCalls: ProviderToolCall[] = toolUses.map((u) => ({
-        id: u.id,
+      const toolCalls: ProviderToolCall[] = toolUses.map((u, i) => ({
+        // fallback-matched blocks may miss `id`/`name` — synthesize stable ones
+        id: u.id ?? `call_${i}`,
         type: 'function',
         function: {
-          name: u.name,
+          name: u.name ?? 'tool',
           arguments: JSON.stringify(u.input ?? {}),
         },
       }));
@@ -274,15 +307,20 @@ function translateMessage(msg: { role: 'user' | 'assistant'; content: string | A
   const out: ProviderMessage[] = [];
   for (const block of blocks) {
     if (block.type === 'tool_result') {
-      out.push({ role: 'tool', content: toolResultToText(block), tool_call_id: block.tool_use_id });
+      out.push({
+        role: 'tool',
+        content: toolResultToText(block),
+        // fallback-matched blocks may miss `tool_use_id` — synthesize one
+        tool_call_id: block.tool_use_id ?? `call_${out.length}`,
+      });
     }
   }
   const rest = blocks.filter((b) => b.type !== 'tool_result');
   if (rest.length > 0) {
     const hasImages = rest.some((b) => b.type === 'image');
     if (hasImages) {
-      const parts: ProviderContentPart[] = rest.map((b) => {
-        if (b.type === 'text') return { type: 'text' as const, text: b.text };
+      const parts = rest.map((b): ProviderContentPart | null => {
+        if (b.type === 'text') return { type: 'text' as const, text: b.text ?? '' };
         if (b.type === 'image') return imageSourceToPart(b);
         if (b.type === 'document') return { type: 'text' as const, text: documentToText(b) };
         // thinking blocks in user history are dropped
@@ -434,7 +472,7 @@ export function estimateInputTokens(messages: ProviderMessage[], system?: string
   for (const m of messages) {
     if (typeof m.content === 'string') chars += m.content.length;
     else if (Array.isArray(m.content)) {
-      for (const p of m.content) chars += p.text?.length ?? 0;
+      for (const p of m.content) chars += p.type === 'text' ? p.text.length : 0;
     }
     if (m.tool_calls) {
       for (const tc of m.tool_calls) chars += tc.function.arguments.length + tc.function.name.length;

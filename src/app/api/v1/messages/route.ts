@@ -179,35 +179,19 @@ export async function POST(req: Request) {
   const messageId = randomId('msg');
   const estimatedInput = estimateInputTokens(translated.messages, null);
 
-  const callProvider = (stream: boolean, signal?: AbortSignal) =>
-    stream
-      ? streamChat({
-          messages: translated.messages,
-          modelId: model.modelId,
-          provider: model.provider,
-          temperature: translated.temperature,
-          maxTokens: translated.maxTokens,
-          topP: translated.topP,
-          topK: translated.topK,
-          stop: translated.stop,
-          tools: translated.tools,
-          toolChoice: translated.toolChoice,
-          thinkingEnabled: translated.thinkingEnabled,
-          signal,
-        })
-      : completeChat({
-          messages: translated.messages,
-          modelId: model.modelId,
-          provider: model.provider,
-          temperature: translated.temperature,
-          maxTokens: translated.maxTokens,
-          topP: translated.topP,
-          topK: translated.topK,
-          stop: translated.stop,
-          tools: translated.tools,
-          toolChoice: translated.toolChoice,
-          thinkingEnabled: translated.thinkingEnabled,
-        });
+  const providerOpts = {
+    messages: translated.messages,
+    modelId: model.modelId,
+    provider: model.provider,
+    temperature: translated.temperature,
+    maxTokens: translated.maxTokens,
+    topP: translated.topP,
+    topK: translated.topK,
+    stop: translated.stop,
+    tools: translated.tools,
+    toolChoice: translated.toolChoice,
+    thinkingEnabled: translated.thinkingEnabled,
+  };
 
   // ── Streaming (Anthropic SSE event protocol) ───────────────────────────────
   if (body.stream) {
@@ -242,7 +226,7 @@ export async function POST(req: Request) {
 
         write(translator.start());
         try {
-          for await (const ev of callProvider(true, abortController.signal)) {
+          for await (const ev of streamChat({ ...providerOpts, signal: abortController.signal })) {
             if (ev.type === 'delta') full += ev.content;
             if (ev.type === 'tool-call-delta') sawToolCall = true;
             if (ev.type === 'served-model') servedModel = ev.model;
@@ -319,7 +303,7 @@ export async function POST(req: Request) {
 
   // ── Non-streaming (Anthropic message response) ─────────────────────────────
   try {
-    const res = await callProvider(false);
+    const res = await completeChat(providerOpts);
     if ((!res.content || res.content.trim().length === 0) && res.toolCalls.length === 0) {
       throw new ProviderError('provider_error', 'The provider returned an empty response.');
     }

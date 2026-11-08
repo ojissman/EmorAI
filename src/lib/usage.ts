@@ -63,7 +63,9 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
 export function estimateUsage(
   messages: { content: unknown }[],
   completionText: string,
-  toolCalls?: { arguments?: string }[]
+  // Accepts both the flat shape ({ arguments }) and the provider tool-call
+  // shape ({ function: { arguments } }) — callers pass whichever they hold.
+  toolCalls?: ReadonlyArray<{ arguments?: string; function?: { arguments?: string } }>
 ): TokenUsage {
   let chars = 0;
   for (const m of messages) {
@@ -73,7 +75,7 @@ export function estimateUsage(
     }
   }
   if (Array.isArray(toolCalls)) {
-    for (const tc of toolCalls) chars += tc.arguments?.length ?? 0;
+    for (const tc of toolCalls) chars += tc.arguments?.length ?? tc.function?.arguments?.length ?? 0;
   }
   const promptTokens = Math.ceil(chars / 4);
   const completionTokens = Math.ceil(completionText.length / 4);

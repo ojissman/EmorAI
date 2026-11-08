@@ -49,7 +49,7 @@ export async function POST(req: Request) {
       endpoint: ENDPOINT,
       statusCode: 400,
       requestId,
-      apiKeyId: key.apiKeyId,
+      apiKeyId: auth.key.apiKeyId,
       modelId: modelGuessFromRaw(raw),
       success: false,
       errorText: `${message} | body: ${requestBodyPreview(raw)}`,

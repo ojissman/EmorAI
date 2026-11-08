@@ -94,6 +94,9 @@ export async function POST(req: Request) {
       `"${model.displayName}" is disabled in Settings → Models. Enable it or pick another model — EmorAI never switches models silently.`
     );
   }
+  // Hoisted closures (persistAssistant below) cannot rely on control-flow
+  // narrowing of `model`, so bake the non-null type into an alias.
+  const activeModel = model;
 
   // ── Conversation state per mode ────────────────────────────────────────────
   let conversation = null as Awaited<ReturnType<typeof db.conversation.findUnique>>;
@@ -220,7 +223,7 @@ export async function POST(req: Request) {
     await recordUsage({
       source: 'dashboard',
       conversationId: conversation!.id,
-      modelId: model.modelId,
+      modelId: activeModel.modelId,
       servedModel,
       usage: finalUsage ?? estimateUsage(providerMessages, fullContent),
       latencyMs: Date.now() - startedAt,
