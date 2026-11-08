@@ -17,6 +17,10 @@ export const CORS_HEADERS = {
 /** Standard JSON response with CORS headers applied. */
 export function corsJson(data: unknown, init?: ResponseInit & { headers?: Record<string, string> }): Response {
   const headers = new Headers(init?.headers);
+  // Explicit JSON content-type — a bare `new Response(string)` would default
+  // to text/plain and break strict OpenAI/Anthropic SDK clients that parse by
+  // content-type.
+  headers.set('Content-Type', 'application/json');
   for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
   return new Response(JSON.stringify(data), { ...init, headers });
 }
