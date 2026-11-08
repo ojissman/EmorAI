@@ -1,0 +1,321 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ── EmorAI light theme ─────────────────────────────────────────────────── */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.982 0.003 295);
+  --foreground: oklch(0.21 0.02 295);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.02 295);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.02 295);
+  --primary: oklch(0.53 0.22 293);
+  --primary-foreground: oklch(0.985 0.005 295);
+  --secondary: oklch(0.955 0.008 295);
+  --secondary-foreground: oklch(0.27 0.02 295);
+  --muted: oklch(0.955 0.008 295);
+  --muted-foreground: oklch(0.52 0.02 295);
+  --accent: oklch(0.945 0.02 293);
+  --accent-foreground: oklch(0.33 0.06 293);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.905 0.01 295);
+  --input: oklch(0.905 0.01 295);
+  --ring: oklch(0.6 0.18 293);
+  --chart-1: oklch(0.53 0.22 293);
+  --chart-2: oklch(0.6 0.14 220);
+  --chart-3: oklch(0.55 0.19 330);
+  --chart-4: oklch(0.68 0.15 160);
+  --chart-5: oklch(0.7 0.16 60);
+  --sidebar: oklch(0.965 0.006 295);
+  --sidebar-foreground: oklch(0.24 0.02 295);
+  --sidebar-primary: oklch(0.53 0.22 293);
+  --sidebar-primary-foreground: oklch(0.985 0.005 295);
+  --sidebar-accent: oklch(0.93 0.014 293);
+  --sidebar-accent-foreground: oklch(0.3 0.04 293);
+  --sidebar-border: oklch(0.9 0.01 295);
+  --sidebar-ring: oklch(0.6 0.18 293);
+}
+
+/* ── EmorAI dark theme: charcoal + violet ───────────────────────────────── */
+.dark {
+  --background: oklch(0.165 0.012 290);
+  --foreground: oklch(0.93 0.008 290);
+  --card: oklch(0.2 0.014 290);
+  --card-foreground: oklch(0.93 0.008 290);
+  --popover: oklch(0.21 0.014 290);
+  --popover-foreground: oklch(0.93 0.008 290);
+  --primary: oklch(0.68 0.19 293);
+  --primary-foreground: oklch(0.16 0.02 293);
+  --secondary: oklch(0.25 0.016 290);
+  --secondary-foreground: oklch(0.93 0.008 290);
+  --muted: oklch(0.24 0.014 290);
+  --muted-foreground: oklch(0.66 0.014 290);
+  --accent: oklch(0.28 0.03 293);
+  --accent-foreground: oklch(0.9 0.02 293);
+  --destructive: oklch(0.66 0.19 22);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.62 0.16 293 / 60%);
+  --chart-1: oklch(0.68 0.19 293);
+  --chart-2: oklch(0.7 0.13 220);
+  --chart-3: oklch(0.66 0.17 330);
+  --chart-4: oklch(0.72 0.14 160);
+  --chart-5: oklch(0.75 0.14 60);
+  --sidebar: oklch(0.145 0.012 290);
+  --sidebar-foreground: oklch(0.9 0.008 290);
+  --sidebar-primary: oklch(0.68 0.19 293);
+  --sidebar-primary-foreground: oklch(0.16 0.02 293);
+  --sidebar-accent: oklch(0.24 0.02 291);
+  --sidebar-accent-foreground: oklch(0.92 0.01 290);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-ring: oklch(0.62 0.16 293 / 60%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  ::selection {
+    background: oklch(0.68 0.19 293 / 30%);
+  }
+}
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────── */
+.emor-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.5 0.02 290 / 35%) transparent;
+}
+.emor-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.emor-scroll::-webkit-scrollbar-thumb {
+  background: oklch(0.5 0.02 290 / 35%);
+  border-radius: 8px;
+}
+.emor-scroll::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.55 0.04 293 / 50%);
+}
+.emor-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── Streaming caret ────────────────────────────────────────────────────── */
+.emor-caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  opacity: 0.7;
+  animation: emor-blink 1s steps(2, start) infinite;
+  border-radius: 1px;
+}
+@keyframes emor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ── Message entrance ───────────────────────────────────────────────────── */
+.emor-enter {
+  animation: emor-fade-up 0.22s ease-out both;
+}
+@keyframes emor-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── Markdown ───────────────────────────────────────────────────────────── */
+.emor-md {
+  line-height: 1.7;
+  word-break: break-word;
+  font-size: 0.925rem;
+}
+.emor-md > *:first-child {
+  margin-top: 0;
+}
+.emor-md > *:last-child {
+  margin-bottom: 0;
+}
+.emor-md p {
+  margin: 0.65em 0;
+}
+.emor-md h1,
+.emor-md h2,
+.emor-md h3,
+.emor-md h4 {
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 1.3em 0 0.55em;
+}
+.emor-md h1 {
+  font-size: 1.35em;
+}
+.emor-md h2 {
+  font-size: 1.22em;
+}
+.emor-md h3 {
+  font-size: 1.1em;
+}
+.emor-md h4 {
+  font-size: 1em;
+}
+.emor-md ul,
+.emor-md ol {
+  margin: 0.55em 0;
+  padding-left: 1.5em;
+}
+.emor-md ul {
+  list-style: disc;
+}
+.emor-md ol {
+  list-style: decimal;
+}
+.emor-md li {
+  margin: 0.3em 0;
+}
+.emor-md li > ul,
+.emor-md li > ol {
+  margin: 0.25em 0;
+}
+.emor-md a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.emor-md blockquote {
+  border-left: 3px solid var(--primary);
+  padding: 0.1em 0 0.1em 1em;
+  margin: 0.8em 0;
+  color: var(--muted-foreground);
+}
+.emor-md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+.emor-md code:not(pre code) {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  padding: 0.12em 0.38em;
+  border-radius: 5px;
+}
+.emor-md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.9em 0;
+  font-size: 0.9em;
+}
+.emor-md th,
+.emor-md td {
+  border: 1px solid var(--border);
+  padding: 0.45em 0.75em;
+  text-align: left;
+}
+.emor-md th {
+  background: var(--muted);
+  font-weight: 600;
+}
+.emor-md img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+/* ── Code blocks ────────────────────────────────────────────────────────── */
+.emor-codeblock {
+  margin: 0.9em 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: oklch(0.17 0.014 290);
+}
+.light .emor-codeblock,
+:root:not(.dark) .emor-codeblock {
+  background: oklch(0.965 0.006 295);
+}
+.emor-codeblock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0.35rem 0.3rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  background: oklch(1 0 0 / 3%);
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+.emor-codeblock pre {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+.emor-codeblock pre code {
+  font-family: var(--font-mono);
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emor-enter,
+  .emor-caret::after {
+    animation: none;
+  }
+}
