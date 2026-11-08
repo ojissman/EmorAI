@@ -99,7 +99,10 @@ export const anthropicMessageSchema = z.object({
 
 export const anthropicToolSchema = z.object({
   name: z.string().min(1).max(128),
-  description: z.string().max(2048).optional(),
+  // Coding agents (ZCode, Claude Code…) ship long descriptions. Accept what
+  // the real Anthropic API accepts; the provider adapter clamps to the
+  // upstream limit before forwarding.
+  description: z.string().max(100_000).optional(),
   input_schema: z.record(z.string(), z.unknown()),
   cache_control: z.unknown().optional(),
 });

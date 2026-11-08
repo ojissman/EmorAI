@@ -1,5 +1,6 @@
 import ZAI from 'z-ai-web-dev-sdk';
 import { parseUpstreamSSE, sseDone, sseEvent } from '@/lib/ai/sse';
+import { sanitizeToolsForProvider, translateToolChoiceName, type SanitizedTools } from '@/lib/ai/provider-tool-limits';
 import type { ProviderMessage, ProviderTool, ProviderToolCall, TokenUsage, WebSource } from '@/lib/types';
 
 // ─── Provider errors ─────────────────────────────────────────────────────────
@@ -121,7 +122,22 @@ function providerSupported(provider?: string): boolean {
   return !provider || provider === 'zai';
 }
 
-function buildBody(opts: StreamChatOptions, stream: boolean): Record<string, unknown> {
+// Coding agents ship tool descriptions beyond the provider's 2048-char limit
+// (and occasionally exotic tool names); normalize once per request so the
+// upstream never rejects an otherwise valid call. Returns the sanitized opts
+// plus the maps for transparent name round-tripping.
+function sanitizeToolset(opts: StreamChatOptions): { safeOpts: StreamChatOptions; toolSafe: SanitizedTools | null } {
+  if (!opts.tools || opts.tools.length === 0) return { safeOpts: opts, toolSafe: null };
+  const toolSafe = sanitizeToolsForProvider(opts.tools);
+  return { safeOpts: { ...opts, tools: toolSafe.tools }, toolSafe };
+}
+
+/** Restores the caller's original tool name for a provider-reported name. */
+function restoreToolName(name: string, toolSafe: SanitizedTools | null): string {
+  return toolSafe ? toolSafe.bySanitized.get(name) ?? name : name;
+}
+
+function buildBody(opts: StreamChatOptions, stream: boolean, toolSafe: SanitizedTools | null = null): Record<string, unknown> {
   const body: Record<string, unknown> = {
     messages: opts.messages,
     stream,
@@ -135,7 +151,11 @@ function buildBody(opts: StreamChatOptions, stream: boolean): Record<string, unk
   if (opts.stop && opts.stop.length > 0) body.stop = opts.stop.slice(0, 16);
   if (opts.tools && opts.tools.length > 0) {
     body.tools = opts.tools;
-    if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
+    if (opts.toolChoice !== undefined) {
+      // tool_choice arrives with the caller's original names — translate to
+      // whatever sanitized name (if any) was sent upstream.
+      body.tool_choice = toolSafe ? translateToolChoiceName(opts.toolChoice, toolSafe.byOriginal) : opts.toolChoice;
+    }
   }
   return body;
 }
@@ -177,6 +197,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   }
   throwIfAborted(opts.signal);
 
+  const { safeOpts, toolSafe } = sanitizeToolset(opts);
   const zai = await ZAI.create();
   let attempt = 0;
   let upstream: ReadableStream<Uint8Array> | undefined;
@@ -185,7 +206,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // Connect with backoff for rate limits; never retry mid-stream.
   for (;;) {
     try {
-      const body = buildBody(opts, true);
+      const body = buildBody(safeOpts, true, toolSafe);
       const res = hasVisionParts
         ? await zai.chat.completions.createVision(body as never)
         : await zai.chat.completions.create(body as never);
@@ -229,12 +250,14 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           if (Array.isArray(toolCalls)) {
             for (const tc of toolCalls) {
               const fn = tc.function as Record<string, unknown> | undefined;
+              const rawName = typeof fn?.name === 'string' && fn.name ? fn.name : undefined;
               yield {
                 type: 'tool-call-delta',
                 call: {
                   index: typeof tc.index === 'number' ? tc.index : 0,
                   id: typeof tc.id === 'string' && tc.id ? tc.id : undefined,
-                  name: typeof fn?.name === 'string' && fn.name ? fn.name : undefined,
+                  // report the caller's original tool name, not the sanitized one
+                  name: rawName ? restoreToolName(rawName, toolSafe) : undefined,
                   argumentsDelta: typeof fn?.arguments === 'string' ? fn.arguments : undefined,
                 },
               };
@@ -274,13 +297,14 @@ export async function completeChat(opts: StreamChatOptions): Promise<CompleteCha
   }
   throwIfAborted(opts.signal);
 
+  const { safeOpts, toolSafe } = sanitizeToolset(opts);
   const zai = await ZAI.create();
   let attempt = 0;
   const { signal, cancel } = withTimeout(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   try {
     for (;;) {
       try {
-        const res = (await zai.chat.completions.create(buildBody(opts, false) as never)) as {
+        const res = (await zai.chat.completions.create(buildBody(safeOpts, false, toolSafe) as never)) as {
           model?: string;
           choices?: Array<{
             message?: {
@@ -300,7 +324,8 @@ export async function completeChat(opts: StreamChatOptions): Promise<CompleteCha
             id: tc.id && tc.id.length > 0 ? tc.id : `call_${Date.now().toString(36)}_${i}`,
             type: 'function' as const,
             function: {
-              name: String(tc.function?.name),
+              // report the caller's original tool name, not the sanitized one
+              name: restoreToolName(String(tc.function?.name), toolSafe),
               arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : '{}',
             },
           }));

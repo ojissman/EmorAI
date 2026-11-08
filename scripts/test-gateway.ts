@@ -275,6 +275,69 @@ async function main() {
         : bad('tool round-trip', `status ${r2.status} ${JSON.stringify(r2.body).slice(0, 200)}`);
     }
 
+    // ─── 5b. Coding-agent compatibility: oversized tool descriptions ─────
+    // ZCode/Claude Code ship tool descriptions far beyond the provider's
+    // 2048-char limit (regression: gateway used to reject these itself).
+    section('Coding-agent compatibility: oversized tool descriptions');
+    {
+      const longDesc = `This is a very detailed tool description that a coding agent would ship. It documents file-editing behavior, safety constraints, argument semantics and extensive examples far beyond what any per-field limit should reject. `.repeat(24); // > 8000 chars
+      await sleep(9000);
+      const r = await json('POST', '/api/v1/chat/completions', full.plaintext, {
+        model: 'glm-5.3-flash',
+        messages: [{ role: 'user', content: 'Read the file /tmp/app.ts. You MUST call read_file.' }],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'read_file',
+              description: longDesc,
+              parameters: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string', description: 'Absolute or workspace-relative path of the file to read. '.repeat(60) },
+                },
+                required: ['path'],
+              },
+            },
+          },
+        ],
+        max_tokens: 200,
+      });
+      const toolCalls = r.body?.choices?.[0]?.message?.tool_calls;
+      r.status === 200 &&
+      toolCalls?.length > 0 &&
+      toolCalls[0].function?.name === 'read_file' &&
+      String(toolCalls[0].function.arguments).includes('/tmp/app.ts')
+        ? ok('OpenAI: >2048-char tool description accepted + tool call works', `descLen=${longDesc.length}`)
+        : bad('oversized tool description (OpenAI)', `status ${r.status} ${JSON.stringify(r.body).slice(0, 220)}`);
+
+      // Anthropic format: oversized description AND an exotic tool name
+      // (dots are not in the provider name pattern) — the tool_use response
+      // must report the caller's ORIGINAL name, not the sanitized one.
+      await sleep(9000);
+      const r2 = await json('POST', '/api/v1/messages', full.plaintext, {
+        model: 'glm-5.3-flash',
+        max_tokens: 300,
+        system: 'Always use tools when asked to read files.',
+        messages: [{ role: 'user', content: 'Read the file /tmp/app.ts using your tool.' }],
+        tools: [
+          {
+            name: 'read.file.v2',
+            description: longDesc,
+            input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+          },
+        ],
+      }, { 'x-api-key': full.plaintext });
+      const toolUse = r2.body?.content?.find((b: any) => b.type === 'tool_use');
+      r2.status === 200 &&
+      toolUse &&
+      toolUse.name === 'read.file.v2' &&
+      String(toolUse.input?.path ?? '').includes('/tmp/app.ts') &&
+      r2.body?.stop_reason === 'tool_use'
+        ? ok('Anthropic: oversized description + exotic name round-trips to original name', `name=${toolUse.name}`)
+        : bad('oversized tool description (Anthropic)', `status ${r2.status} ${JSON.stringify(r2.body).slice(0, 220)}`);
+    }
+
     // ─── 6. Anthropic non-streaming ───────────────────────────────────────
     section('Anthropic: POST /api/v1/messages (non-streaming)');
     {

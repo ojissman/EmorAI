@@ -68,7 +68,10 @@ export const toolSchema = z.object({
   type: z.literal('function'),
   function: z.object({
     name: z.string().min(1).max(128),
-    description: z.string().max(2048).optional(),
+    // Coding agents (ZCode, Claude Code…) ship long descriptions. Accept what
+    // the real OpenAI API accepts; the provider adapter clamps to the
+    // upstream limit before forwarding.
+    description: z.string().max(100_000).optional(),
     parameters: z.record(z.string(), z.unknown()).optional(),
   }),
 });
