@@ -59,3 +59,6 @@ db/uploads/
 
 # runtime artifacts
 .zscripts/dev.pid
+
+# agent tool output (never commit)
+tool-results/
