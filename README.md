@@ -92,6 +92,19 @@ bun run dev          # http://localhost:3000
 | Z.ai credentials | `/etc/.z-ai-config` (or project/home dir) | `{"baseUrl": "...", "apiKey": "..."}`. Resolved server-side by the SDK. Never expose publicly. |
 | Uploads | `db/uploads/` | Stored on disk; metadata in the `FileMetadata` table. 10 MB per file limit. |
 
+### Private data bundle (encrypted)
+This public repo keeps personal data out of git and ships it as one encrypted archive instead:
+
+- **Bundle**: `secrets/emorai-secrets.tar.gz.enc` — AES-256-CBC (PBKDF2, 600k iterations) archive of `.env`, `db/custom.db`, `db/uploads/`.
+- **Restore onto a fresh clone**:
+  ```bash
+  export EMORAI_SECRET_PASSPHRASE='…'   # your passphrase — never stored in this repo
+  ./scripts/secrets.sh decrypt          # restores .env, db/custom.db, db/uploads/
+  bun run db:push && bun run dev        # then start the server
+  ```
+- **Refresh after changes** (re-encrypts the current live state): `./scripts/secrets.sh encrypt`, then commit the updated bundle.
+- The passphrase is provided out-of-band only. Old snapshots stay recoverable from git history (previous bundle versions remain in past commits).
+
 ### Model availability
 The Z.ai gateway in this environment currently serves `glm-4-plus` regardless of the requested model ID — EmorAI reports this honestly (see *Settings → Models → Discover availability*, the `served model` note under each assistant reply, and `emorai_served_model` in API responses). If your provider plan grants specific model IDs, they will route through unchanged; candidates in the registry match the requested set (GLM-5.3, GLM-5.3-Flash, GLM-4.7-Flash, GLM-4.5-Flash, GLM-4.6V-Flash).
 
