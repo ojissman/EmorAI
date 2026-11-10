@@ -62,3 +62,6 @@ db/uploads/
 
 # agent tool output (never commit)
 tool-results/
+
+# platform workspace backups (never commit)
+upload/
