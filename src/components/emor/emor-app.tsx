@@ -13,6 +13,7 @@ import {
   Menu,
   MessageSquare,
   MoreVertical,
+  LogOut,
   PanelLeft,
   Plug,
   Settings,
@@ -45,6 +46,8 @@ import { DeveloperHub } from './developer/developer-hub';
 import { VoiceModeDialog } from './chat/voice-mode';
 import { useEmorStore } from '@/stores/emor-store';
 import { useConversations, useModels, useSettings } from '@/hooks/use-emor-queries';
+import { useAdminLogout } from '@/hooks/use-admin-session';
+import { AdminGate } from './admin-gate';
 import { api } from '@/lib/api-client';
 import type { ModelInfo } from '@/lib/types';
 
@@ -147,6 +150,17 @@ function DashboardHeader({
   const openDialog = useEmorStore((s) => s.openDialog);
   const toggleSidebar = useEmorStore((s) => s.toggleSidebar);
   const activeId = useEmorStore((s) => s.activeConversationId);
+  const logout = useAdminLogout();
+
+  const doLogout = async () => {
+    if (logout.isPending) return;
+    try {
+      await logout.mutateAsync();
+      toast.success('Administrator session ended.');
+    } catch (e) {
+      toast.error(String((e as Error).message));
+    }
+  };
 
   const summarize = async () => {
     if (!activeId) {
@@ -204,6 +218,11 @@ function DashboardHeader({
           <DropdownMenuItem onClick={() => openDialog('settings', 'general')}>
             <Settings className="size-3.5" /> Settings
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => void doLogout()} disabled={logout.isPending}>
+            <LogOut className="size-3.5" />
+            {logout.isPending ? 'Logging out…' : 'Log out'}
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </header>
@@ -215,7 +234,9 @@ export function EmorApp() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delayDuration={200}>
-        <EmorDashboard />
+        <AdminGate>
+          <EmorDashboard />
+        </AdminGate>
       </TooltipProvider>
     </QueryClientProvider>
   );

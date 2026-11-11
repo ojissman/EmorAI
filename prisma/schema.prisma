@@ -112,6 +112,10 @@ model ModelConfig {
   // what the provider gateway actually reported serving
   lastServedModel String?
   lastError       String?
+  // when capabilities were last verified with real probes (null = declared, never verified)
+  capsVerifiedAt  DateTime?
+  // per-capability verification evidence { chat: 'verified'|'declared'|'failed', ... }
+  capsVerification Json?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 }
@@ -332,4 +336,115 @@ model RoutingDecision {
 
   @@index([createdAt])
   @@index([modelId, createdAt])
+}
+
+// ─── Administrator authentication (Phase 10, Priority 0) ─────────────────────
+// Single-owner platform: one administrator identity. The password hash is
+// bootstrapped from EMORAI_ADMIN_PASSWORD on first login (the credential row is
+// the source of truth afterwards). Customer emr_ API keys are NEVER accepted.
+model AdminCredential {
+  id           String   @id @default(cuid())
+  username     String   @unique @default("admin")
+  // scrypt hash, format "scrypt:N:r:p:saltB64:hashB64" — never plaintext
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model AdminSession {
+  id         String    @id @default(cuid())
+  // sha256 of the 32-byte session token; plaintext exists only in the HttpOnly
+  // cookie, never in the database
+  tokenHash  String    @unique
+  // CSRF double-submit token (mirrored in the readable emor_admin_csrf cookie;
+  // mutating admin requests must echo it as X-CSRF-Token)
+  csrfToken  String
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  lastSeenAt DateTime  @default(now())
+  revokedAt  DateTime?
+  ip         String?
+  userAgent  String?
+
+  @@index([expiresAt])
+}
+
+// ─── Cost accounting (Phase 10, Priority 4) ──────────────────────────────────
+// Historical model pricing. Money is stored as decimal STRINGS, never floats.
+// Rates are admin-configured (or recorded from discovery metadata when the
+// provider publishes prices); unknown costs are never invented as zero.
+model CostRate {
+  id                String    @id @default(cuid())
+  // public ModelConfig.modelId the rate applies to
+  modelId           String
+  // optional account-scoped rate (null = model-wide default)
+  providerAccountId String?
+  // decimal string, currency per 1M input tokens
+  inputPerMTok      String
+  // decimal string, currency per 1M output tokens
+  outputPerMTok     String
+  currency          String    @default("USD")
+  // admin | discovery — where this rate came from
+  source            String    @default("admin")
+  effectiveFrom     DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+
+  @@index([modelId, effectiveFrom])
+}
+
+// One cost row per usage record — idempotent (unique usageRecordId protects
+// against duplicate-retry accounting). priced=false means the usage could not
+// be priced with any configured rate (tracked honestly, never treated as zero).
+model CostLedger {
+  id                String   @id @default(cuid())
+  usageRecordId     String   @unique
+  providerAccountId String?
+  apiKeyId          String?
+  modelId           String
+  upstreamModelId   String?
+  inputTokens       Int      @default(0)
+  outputTokens      Int      @default(0)
+  // decimal strings in `currency` (e.g. "0.001250")
+  inputCost         String?
+  outputCost        String?
+  totalCost         String?
+  currency          String   @default("USD")
+  priced            Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  @@index([providerAccountId, createdAt])
+  @@index([createdAt])
+}
+
+// ─── Background jobs + alerting (Phase 10, Priority 7) ──────────────────────
+model JobRun {
+  id         String    @id @default(cuid())
+  jobName    String
+  // running | success | failed | skipped
+  status     String    @default("running")
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  result     Json?
+  errorText  String?
+
+  @@index([jobName, startedAt])
+  @@index([startedAt])
+}
+
+// Alerting foundation: operational events recorded for the administrator.
+// Delivery channels (email/webhook) are intentionally not fabricated — events
+// are recorded and surfaced in the dashboard; wiring a notifier is config.
+model AlertEvent {
+  id             String    @id @default(cuid())
+  // info | warning | critical
+  level          String    @default("warning")
+  // provider_health | budget | job | auth | capability | concurrency
+  category       String
+  message        String
+  meta           Json?
+  acknowledgedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([level, createdAt])
 }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { db } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { planExecution } from '@/lib/ai/router';
 
 export const runtime = 'nodejs';
@@ -32,6 +33,8 @@ const patchSchema = z.object({
 });
 
 export async function PATCH(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
   const { id } = await params;
   let body: unknown;
   try {
@@ -60,7 +63,9 @@ export async function PATCH(req: Request, { params }: Params) {
   return ok({ route: updated, preview });
 }
 
-export async function DELETE(_req: Request, { params }: Params) {
+export async function DELETE(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
   const { id } = await params;
   const route = await db.modelRoute.findUnique({ where: { id } });
   if (!route) return fail(404, 'not_found', 'Route not found.');

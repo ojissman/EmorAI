@@ -16,7 +16,14 @@ import type {
   UpstreamModel,
 } from './types';
 import { ProviderError } from '@/lib/ai/zai-adapter';
+import type { ProviderErrorCode } from '@/lib/ai/zai-adapter';
 import { parseUpstreamSSE } from '@/lib/ai/sse';
+import {
+  DestinationBlockedError,
+  ResponseTooLargeError,
+  secureFetch,
+} from '@/lib/net/secure-fetch';
+import { loadNetworkPolicy } from '@/lib/net/url-policy';
 import type { ProviderContentPart, ProviderMessage, ProviderTool, ProviderToolCall, TokenUsage } from '@/lib/types';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -37,6 +44,31 @@ function headersOf(ctx: AdapterContext): Record<string, string> {
     'anthropic-version': ANTHROPIC_VERSION,
     'Content-Type': 'application/json',
   };
+}
+
+/**
+ * Network-policy failures surface as ProviderError with honest codes
+ * ('destination_blocked' | 'response_too_large'). These codes widen the shared
+ * ProviderErrorCode union at runtime; the union itself lives in zai-adapter.ts,
+ * which is owned by a separate workstream and intentionally untouched here.
+ * Unknown codes fall through to generic provider-error handling downstream.
+ */
+function policyFailure(e: unknown): ProviderError | null {
+  if (e instanceof DestinationBlockedError) {
+    return new ProviderError(
+      'destination_blocked' as ProviderErrorCode,
+      `Upstream destination rejected by network policy (${e.reason}).`,
+      { status: 502 },
+    );
+  }
+  if (e instanceof ResponseTooLargeError) {
+    return new ProviderError(
+      'response_too_large' as ProviderErrorCode,
+      'Upstream response exceeded the configured size cap and was aborted.',
+      { status: 502 },
+    );
+  }
+  return null;
 }
 
 function classifyHttp(status: number, bodyText: string): ProviderError {
@@ -197,7 +229,14 @@ export const anthropicCompatAdapter: AIProviderAdapter = {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);
     try {
-      const res = await fetch(`${baseUrlOf(ctx)}/models`, { method: 'GET', headers: headersOf(ctx), signal: controller.signal });
+      // SSRF guard: destination policy (fresh DNS, redirect + size caps) wraps
+      // every outbound call; timeout budget is unchanged
+      const policy = await loadNetworkPolicy();
+      const res = await secureFetch(
+        `${baseUrlOf(ctx)}/models`,
+        { method: 'GET', headers: headersOf(ctx), signal: controller.signal },
+        { timeoutMs: 30_000, policy },
+      );
       const text = await res.text();
       if (!res.ok) throw classifyHttp(res.status, text);
       const data = JSON.parse(text) as { data?: Array<{ id?: string; display_name?: string }> };
@@ -206,6 +245,8 @@ export const anthropicCompatAdapter: AIProviderAdapter = {
         .map((m) => ({ modelId: String(m.id), displayName: m.display_name ?? undefined, raw: m as Record<string, unknown> }));
     } catch (e) {
       if (e instanceof ProviderError) throw e;
+      const policyErr = policyFailure(e);
+      if (policyErr) throw policyErr;
       throw new ProviderError('provider_error', `Model discovery failed: ${String((e as Error)?.message ?? e).slice(0, 300)}`, { status: 502 });
     } finally {
       clearTimeout(timer);
@@ -224,12 +265,17 @@ export const anthropicCompatAdapter: AIProviderAdapter = {
     const toolAcc = new Map<number, { id: string; name: string; args: string }>();
     let toolIndex = 0;
     try {
-      const res = await fetch(`${baseUrlOf(ctx)}/messages`, {
-        method: 'POST',
-        headers: headersOf(ctx),
-        body: JSON.stringify(toAnthropicBody(opts, true)),
-        signal: controller.signal,
-      });
+      const policy = await loadNetworkPolicy();
+      const res = await secureFetch(
+        `${baseUrlOf(ctx)}/messages`,
+        {
+          method: 'POST',
+          headers: headersOf(ctx),
+          body: JSON.stringify(toAnthropicBody(opts, true)),
+          signal: controller.signal,
+        },
+        { timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, policy },
+      );
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw classifyHttp(res.status, text);
@@ -277,6 +323,12 @@ export const anthropicCompatAdapter: AIProviderAdapter = {
           throw new ProviderError('provider_error', `Upstream stream error: ${err?.message ?? 'unknown'}`, { status: 502 });
         }
       }
+    } catch (e) {
+      // network-policy failures surface as honest ProviderErrors; everything
+      // else keeps the generator's existing (raw) propagation semantics
+      const policyErr = policyFailure(e);
+      if (policyErr) throw policyErr;
+      throw e;
     } finally {
       clearTimeout(timer);
       try {
@@ -291,12 +343,17 @@ export const anthropicCompatAdapter: AIProviderAdapter = {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
-      const res = await fetch(`${baseUrlOf(ctx)}/messages`, {
-        method: 'POST',
-        headers: headersOf(ctx),
-        body: JSON.stringify(toAnthropicBody(opts, false)),
-        signal: controller.signal,
-      });
+      const policy = await loadNetworkPolicy();
+      const res = await secureFetch(
+        `${baseUrlOf(ctx)}/messages`,
+        {
+          method: 'POST',
+          headers: headersOf(ctx),
+          body: JSON.stringify(toAnthropicBody(opts, false)),
+          signal: controller.signal,
+        },
+        { timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, policy },
+      );
       const text = await res.text();
       if (!res.ok) throw classifyHttp(res.status, text);
       const data = JSON.parse(text) as {
@@ -328,6 +385,12 @@ export const anthropicCompatAdapter: AIProviderAdapter = {
         toolCalls,
         reasoning,
       };
+    } catch (e) {
+      // network-policy failures surface as honest ProviderErrors; everything
+      // else keeps the existing (raw) propagation semantics
+      const policyErr = policyFailure(e);
+      if (policyErr) throw policyErr;
+      throw e;
     } finally {
       clearTimeout(timer);
     }

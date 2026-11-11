@@ -20,7 +20,15 @@ import type {
   UpstreamModel,
 } from './types';
 import { ProviderError } from '@/lib/ai/zai-adapter';
+import type { ProviderErrorCode } from '@/lib/ai/zai-adapter';
 import { parseUpstreamSSE } from '@/lib/ai/sse';
+import {
+  DestinationBlockedError,
+  ResponseTooLargeError,
+  isAbortLikeError,
+  secureFetch,
+} from '@/lib/net/secure-fetch';
+import { loadNetworkPolicy } from '@/lib/net/url-policy';
 import { finalizeProviderMessages } from '@/lib/api/protocol/roles';
 import type { TokenUsage } from '@/lib/types';
 
@@ -44,6 +52,31 @@ function headersOf(ctx: AdapterContext): Record<string, string> {
   };
 }
 
+/**
+ * Network-policy failures surface as ProviderError with honest codes
+ * ('destination_blocked' | 'response_too_large'). These codes widen the shared
+ * ProviderErrorCode union at runtime; the union itself lives in zai-adapter.ts,
+ * which is owned by a separate workstream and intentionally untouched here.
+ * Unknown codes fall through to generic provider-error handling downstream.
+ */
+function policyFailure(e: unknown): ProviderError | null {
+  if (e instanceof DestinationBlockedError) {
+    return new ProviderError(
+      'destination_blocked' as ProviderErrorCode,
+      `Upstream destination rejected by network policy (${e.reason}).`,
+      { status: 502 },
+    );
+  }
+  if (e instanceof ResponseTooLargeError) {
+    return new ProviderError(
+      'response_too_large' as ProviderErrorCode,
+      'Upstream response exceeded the configured size cap and was aborted.',
+      { status: 502 },
+    );
+  }
+  return null;
+}
+
 /** Normalizes upstream HTTP/JSON failures into ProviderError. */
 function classifyHttp(status: number, bodyText: string): ProviderError {
   const snippet = bodyText.slice(0, 300);
@@ -64,18 +97,27 @@ function classifyHttp(status: number, bodyText: string): ProviderError {
 
 async function fetchJson(ctx: AdapterContext, path: string, init: RequestInit & { timeoutMs?: number }): Promise<unknown> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeoutMs = init.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const external = init.signal;
   if (external) {
     if (external.aborted) controller.abort();
     else external.addEventListener('abort', () => controller.abort(), { once: true });
   }
   try {
-    const res = await fetch(`${baseUrlOf(ctx)}${path}`, {
-      ...init,
-      signal: controller.signal,
-      headers: { ...headersOf(ctx), ...(init.headers ?? {}) },
-    });
+    // SSRF guard: destination policy (fresh DNS, redirect + size caps) wraps
+    // every outbound call; timeout semantics are unchanged (same budget,
+    // combined with the adapter's abort controller)
+    const policy = await loadNetworkPolicy();
+    const res = await secureFetch(
+      `${baseUrlOf(ctx)}${path}`,
+      {
+        ...init,
+        signal: controller.signal,
+        headers: { ...headersOf(ctx), ...(init.headers ?? {}) },
+      },
+      { timeoutMs, policy },
+    );
     const text = await res.text();
     if (!res.ok) throw classifyHttp(res.status, text);
     try {
@@ -85,7 +127,9 @@ async function fetchJson(ctx: AdapterContext, path: string, init: RequestInit & 
     }
   } catch (e) {
     if (e instanceof ProviderError) throw e;
-    if ((e as Error)?.name === 'AbortError') {
+    const policyErr = policyFailure(e);
+    if (policyErr) throw policyErr;
+    if (isAbortLikeError(e)) {
       throw new ProviderError('timeout', 'Upstream request timed out.', { status: 504 });
     }
     throw new ProviderError('provider_error', `Upstream request failed: ${String((e as Error)?.message ?? e).slice(0, 300)}`, { status: 502, retryable: true });
@@ -157,12 +201,17 @@ export const openAiCompatAdapter: AIProviderAdapter = {
     }
     let upstream: ReadableStream<Uint8Array> | null = null;
     try {
-      const res = await fetch(`${baseUrlOf(ctx)}/chat/completions`, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: headersOf(ctx),
-        body: JSON.stringify(buildBody(opts, true)),
-      });
+      const policy = await loadNetworkPolicy();
+      const res = await secureFetch(
+        `${baseUrlOf(ctx)}/chat/completions`,
+        {
+          method: 'POST',
+          signal: controller.signal,
+          headers: headersOf(ctx),
+          body: JSON.stringify(buildBody(opts, true)),
+        },
+        { timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, policy },
+      );
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw classifyHttp(res.status, text);
@@ -208,6 +257,12 @@ export const openAiCompatAdapter: AIProviderAdapter = {
         const usage = normalizeUsage(data.usage as Record<string, unknown> | undefined);
         if (usage) yield { type: 'usage', usage };
       }
+    } catch (e) {
+      // network-policy failures surface as honest ProviderErrors; everything
+      // else keeps the generator's existing (raw) propagation semantics
+      const policyErr = policyFailure(e);
+      if (policyErr) throw policyErr;
+      throw e;
     } finally {
       clearTimeout(timer);
       try {

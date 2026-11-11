@@ -5,6 +5,7 @@ import { getModelInfoByModelId } from '@/lib/model-registry';
 import { rateLimit } from '@/lib/rate-limit';
 import { recordUsage, estimateUsage } from '@/lib/usage';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { SSE_HEADERS, sseEvent } from '@/lib/ai/sse';
 import { ProviderError, generateTitle, webSearch } from '@/lib/ai/zai-adapter';
 import { streamChatRouted, type RouteAttribution } from '@/lib/ai/router';
@@ -55,6 +56,10 @@ async function loadHistoryWithFiles(conversationId: string, limit: number): Prom
 }
 
 export async function POST(req: Request) {
+  // Auth guard runs before any streaming starts.
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

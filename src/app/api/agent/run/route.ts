@@ -4,6 +4,7 @@ import { getSettings } from '@/lib/settings';
 import { getModelInfoByModelId, listEnabledModels } from '@/lib/model-registry';
 import { rateLimit } from '@/lib/rate-limit';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { SSE_HEADERS, sseDone, sseEvent } from '@/lib/ai/sse';
 import { completeChat, streamChat } from '@/lib/ai/zai-adapter';
 import { serializeArtifact, parseArtifactFiles } from '@/lib/artifacts';
@@ -163,6 +164,10 @@ function parsePlan(raw: string): AgentPlan {
 }
 
 export async function POST(req: Request) {
+  // Auth guard runs before any streaming starts.
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

@@ -1,12 +1,16 @@
 import { readStoredFile, deleteStoredFile } from '@/lib/files';
 import { fail, ok } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 
 export const runtime = 'nodejs';
 
 type Params = { params: Promise<{ id: string }> };
 
 /** Serves an uploaded file's bytes (used for image previews and vision requests). */
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const stored = await readStoredFile(id);
   if (!stored) return fail(404, 'not_found', 'File not found.');
@@ -19,7 +23,10 @@ export async function GET(_req: Request, { params }: Params) {
   });
 }
 
-export async function DELETE(_req: Request, { params }: Params) {
+export async function DELETE(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   await deleteStoredFile(id);
   return ok({ deleted: true });

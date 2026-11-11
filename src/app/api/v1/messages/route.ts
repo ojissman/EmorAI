@@ -135,14 +135,10 @@ export async function POST(req: Request) {
     logClientError(404, 'model_disabled', message, model.modelId);
     return anthropicError(404, 'not_found_error', message, authHeaders);
   }
-  if (model.provider !== 'zai' && model.category !== 'emorai') {
-    return anthropicError(
-      501,
-      'api_error',
-      `Model "${model.modelId}" routes to provider "${model.provider}", which is not configured on this installation.`,
-      authHeaders
-    );
-  }
+  // Provider-category models (adopted from openai/anthropic/self-hosted
+  // accounts) execute through their configured ModelRoutes — the intelligent
+  // router is the single eligibility authority and answers honestly (501)
+  // when a model has no eligible route. No provider allowlist gate here.
 
   const hasImages = body.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image'));
   if (hasImages && !model.capabilities.vision) {

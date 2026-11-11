@@ -1,5 +1,6 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { parseArtifactFiles } from '@/lib/artifacts';
 
 export const runtime = 'nodejs';
@@ -27,7 +28,10 @@ function mimeForPath(p: string): string {
  * inside a sandboxed iframe. Sibling files resolve relative links through
  * /api/artifacts/[id]/preview/[...path].
  */
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const artifact = await db.artifact.findUnique({ where: { id } });
   if (!artifact) return fail(404, 'artifact_not_found', 'That artifact does not exist.');

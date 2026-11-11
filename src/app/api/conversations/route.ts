@@ -2,11 +2,15 @@ import { z } from 'zod';
 import { db } from '@/lib/db';
 import { getSettings } from '@/lib/settings';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { serializeConversation } from '@/lib/serialize';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const url = new URL(req.url);
   const q = url.searchParams.get('q')?.trim() ?? '';
   const folderId = url.searchParams.get('folderId');
@@ -35,6 +39,9 @@ const createSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown = {};
   try {
     body = await req.json();

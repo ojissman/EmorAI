@@ -59,6 +59,8 @@ import type { AppSettings, ModelCapabilities, ModelInfo, ModelLifecycle } from '
 import { cn } from '@/lib/utils';
 import { ProvidersTab } from './providers-tab';
 import { RoutesTab } from './routing-tab';
+import { NetworkSection } from './network-section';
+import { OpsTab } from './ops/ops-tab';
 
 function GeneralForm({
   settings,
@@ -633,9 +635,12 @@ function ProviderTab() {
           <li>• EmorAI API keys are stored as SHA-256 hashes; plaintext is shown once at creation.</li>
           <li>• Developer API authentication uses Bearer tokens — provider credentials are never involved.</li>
           <li>• Cross-origin mutating requests to the dashboard API are rejected; per-key rate limits apply to /api/v1.</li>
+          <li>• Administrator sessions are server-side, CSRF-protected, and revoked on logout.</li>
           <li>• This is a single-owner installation: treat generated keys as trusted access to your provider quota.</li>
         </ul>
       </div>
+
+      <NetworkSection />
 
       <div className="rounded-xl border p-4">
         <div className="flex items-center gap-2">
@@ -783,13 +788,14 @@ export function SettingsDialog() {
           <DialogDescription>Configure your EmorAI installation.</DialogDescription>
         </DialogHeader>
         <Tabs defaultValue={tab} value={tab} onValueChange={(v) => useEmorStore.getState().openDialog('settings', v)} className="flex min-h-0 flex-col">
-          <TabsList className="mx-5 mt-4 grid w-auto grid-cols-4 sm:grid-cols-7">
+          <TabsList className="mx-5 mt-4 grid w-auto grid-cols-4 sm:grid-cols-8">
             <TabsTrigger value="general" className="text-xs">General</TabsTrigger>
             <TabsTrigger value="appearance" className="gap-1 text-xs"><Eye className="size-3" />Look</TabsTrigger>
             <TabsTrigger value="models" className="text-xs">Models</TabsTrigger>
             <TabsTrigger value="providers" className="text-xs">Providers</TabsTrigger>
             <TabsTrigger value="routes" className="text-xs">Routing</TabsTrigger>
             <TabsTrigger value="provider" className="gap-1 text-xs"><Server className="size-3" />Security</TabsTrigger>
+            <TabsTrigger value="ops" className="gap-1 text-xs"><Activity className="size-3" />Ops</TabsTrigger>
             <TabsTrigger value="data" className="gap-1 text-xs"><Database className="size-3" />Data</TabsTrigger>
           </TabsList>
           <div className="emor-scroll min-h-0 flex-1 overflow-y-auto px-5 py-5" style={{ maxHeight: '60vh' }}>
@@ -799,6 +805,7 @@ export function SettingsDialog() {
             <TabsContent value="providers" className="mt-0"><ProvidersTab /></TabsContent>
             <TabsContent value="routes" className="mt-0"><RoutesTab /></TabsContent>
             <TabsContent value="provider" className="mt-0"><ProviderTab /></TabsContent>
+            <TabsContent value="ops" className="mt-0"><OpsTab /></TabsContent>
             <TabsContent value="data" className="mt-0"><DataTab /></TabsContent>
           </div>
         </Tabs>

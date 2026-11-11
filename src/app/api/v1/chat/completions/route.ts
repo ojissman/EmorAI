@@ -197,16 +197,10 @@ export async function POST(req: Request) {
     logClientError(409, 'model_disabled', message, model.modelId);
     return openAiError(409, 'model_disabled', message, 'invalid_request_error', undefined, authHeaders);
   }
-  if (model.provider !== 'zai' && model.category !== 'emorai') {
-    return openAiError(
-      501,
-      'provider_unavailable',
-      `Model "${model.modelId}" routes to provider "${model.provider}", which is not configured on this installation.`,
-      'api_error',
-      undefined,
-      authHeaders
-    );
-  }
+  // Provider-category models (adopted from openai/anthropic/self-hosted
+  // accounts) execute through their configured ModelRoutes — the intelligent
+  // router is the single eligibility authority and answers honestly (501)
+  // when a model has no eligible route. No provider allowlist gate here.
 
   // Vision parts only reach vision-capable models.
   const hasImageParts = body.messages.some(

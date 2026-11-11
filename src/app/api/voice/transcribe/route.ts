@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { getSettings } from '@/lib/settings';
 import { rateLimit } from '@/lib/rate-limit';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { transcribeAudio } from '@/lib/ai/media';
 
 export const runtime = 'nodejs';
@@ -22,6 +23,9 @@ function ipOf(req: Request): string {
 
 /** Speech → text for voice dictation in the composer. */
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

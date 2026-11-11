@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { getAdapterByType, adapterContextForAccount } from '@/lib/ai/providers';
 import { createModelConfig, listModels } from '@/lib/model-registry';
 
@@ -38,8 +39,19 @@ const adoptSchema = z.object({
  * Discovers upstream models through the provider's listing API. Discovered
  * models are NOT published automatically — the admin explicitly adopts
  * selected ones (publication is the `adopt` list), per provider terms.
+ *
+ * Adoption is two-phase so every adopted model is EXECUTABLE immediately on
+ * an authorized account:
+ *   1. a provider-category ModelConfig is created with enabled:false —
+ *      adoption is NOT publication (the admin flips it on in the catalogue;
+ *      customers cannot resolve disabled models until then);
+ *   2. a ModelRoute is auto-created on THIS account (idempotent — skipped
+ *      when an identical route already exists) so the router can serve the
+ *      model the moment it is published.
  */
 export async function POST(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
   const { id } = await params;
   const account = await db.providerAccount.findUnique({ where: { id } });
   if (!account) return fail(404, 'not_found', 'Provider account not found.');
@@ -88,27 +100,74 @@ export async function POST(req: Request, { params }: Params) {
 
     const existing = await listModels();
     const adopted: string[] = [];
+    // execution routes created (or found already existing) for adopted models
+    const routes: Array<{
+      modelId: string;
+      routeId: string;
+      providerAccountId: string;
+      upstreamModelId: string;
+      created: boolean;
+      enabled: boolean;
+    }> = [];
     for (const pick of adopt) {
       const found = upstream.find((m) => m.modelId === pick.modelId);
       if (!found) {
         return fail(400, 'not_discovered', `Model "${pick.modelId}" was not in this account's discovery result.`);
       }
-      if (existing.some((m) => m.modelId === pick.modelId)) continue; // already catalogued
-      const maxOrder = existing.reduce((max, m) => Math.max(max, m.sortOrder), 0);
-      await createModelConfig({
-        modelId: pick.modelId,
-        displayName: pick.displayName ?? pick.modelId,
-        description: `Discovered from ${account.name} (${account.providerType}). Capabilities are admin-verified — never inferred from the model name.`,
-        provider: account.providerType === 'self-hosted' ? 'self-hosted' : account.providerType,
-        category: 'provider',
-        lifecycle: 'active',
-        freeTier: pick.freeTier,
-        enabled: true,
-        capabilities: pick.capabilities,
-        contextWindow: pick.contextWindow ?? found.contextWindow ?? null,
-        sortOrder: maxOrder + 1,
+      // 1. catalogue row — created DISABLED (adoption ≠ publication); an
+      //    already-catalogued model is left untouched
+      if (!existing.some((m) => m.modelId === pick.modelId)) {
+        const maxOrder = existing.reduce((max, m) => Math.max(max, m.sortOrder), 0);
+        await createModelConfig({
+          modelId: pick.modelId,
+          displayName: pick.displayName ?? pick.modelId,
+          description: `Discovered from ${account.name} (${account.providerType}). Capabilities are admin-verified — never inferred from the model name.`,
+          provider: account.providerType === 'self-hosted' ? 'self-hosted' : account.providerType,
+          category: 'provider',
+          lifecycle: 'active',
+          freeTier: pick.freeTier,
+          enabled: false,
+          capabilities: pick.capabilities,
+          contextWindow: pick.contextWindow ?? found.contextWindow ?? null,
+          sortOrder: maxOrder + 1,
+        });
+        adopted.push(pick.modelId);
+      }
+      // 2. execution route on THIS authorized account — idempotent (an
+      //    identical model+account+upstream route is never duplicated).
+      //    Capabilities carry exactly the subset the admin declared.
+      const duplicateRoute = await db.modelRoute.findFirst({
+        where: { publicModelId: pick.modelId, providerAccountId: account.id, upstreamModelId: pick.modelId },
       });
-      adopted.push(pick.modelId);
+      if (duplicateRoute) {
+        routes.push({
+          modelId: pick.modelId,
+          routeId: duplicateRoute.id,
+          providerAccountId: account.id,
+          upstreamModelId: duplicateRoute.upstreamModelId,
+          created: false,
+          enabled: duplicateRoute.enabled,
+        });
+      } else {
+        const route = await db.modelRoute.create({
+          data: {
+            publicModelId: pick.modelId,
+            providerAccountId: account.id,
+            upstreamModelId: pick.modelId,
+            capabilities: pick.capabilities,
+            priority: 0,
+            enabled: true,
+          },
+        });
+        routes.push({
+          modelId: pick.modelId,
+          routeId: route.id,
+          providerAccountId: account.id,
+          upstreamModelId: route.upstreamModelId,
+          created: true,
+          enabled: route.enabled,
+        });
+      }
     }
 
     return ok({
@@ -120,10 +179,11 @@ export async function POST(req: Request, { params }: Params) {
         alreadyCatalogued: existing.some((e) => e.modelId === m.modelId),
       })),
       adopted,
+      routes,
       note:
         adopt.length === 0
           ? 'Dry-run discovery: nothing was published. Pass an `adopt` list to catalogue selected models.'
-          : 'Adopted models are admin-approved for the catalogue.',
+          : 'Adopted models are created DISABLED — enable them in Settings → Models to publish. Their execution routes are live immediately (listed in `routes`).',
     });
   } catch (e) {
     await db.providerAccount.update({

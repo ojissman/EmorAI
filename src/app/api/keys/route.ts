@@ -2,11 +2,15 @@ import { z } from 'zod';
 import { db } from '@/lib/db';
 import { generateApiKey, API_KEY_SCOPES, normalizeScopes } from '@/lib/api-keys';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { serializeApiKey } from '@/lib/serialize';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const keys = await db.apiKey.findMany({ orderBy: { createdAt: 'desc' } });
   return ok({ keys: keys.map(serializeApiKey) });
 }
@@ -21,6 +25,9 @@ const createSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

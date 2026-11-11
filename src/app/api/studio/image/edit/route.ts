@@ -3,6 +3,7 @@ import { db } from '@/lib/db';
 import { getSettings } from '@/lib/settings';
 import { rateLimit } from '@/lib/rate-limit';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { editImage, writeArtifactFile, IMAGE_SIZES } from '@/lib/ai/media';
 import { readStoredFile } from '@/lib/files';
 import { serializeArtifact } from '@/lib/artifacts';
@@ -26,6 +27,9 @@ function ipOf(req: Request): string {
 
 /** Edits an uploaded image (via chat attachment upload) with a prompt. */
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

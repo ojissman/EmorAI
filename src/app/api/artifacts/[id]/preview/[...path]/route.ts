@@ -1,5 +1,6 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { parseArtifactFiles } from '@/lib/artifacts';
 
 export const runtime = 'nodejs';
@@ -29,7 +30,10 @@ function mimeForPath(p: string): string {
 }
 
 /** Serves a sibling file of a multi-file artifact (relative asset resolution). */
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { path: segments } = await params;
   const artifactId = segments?.[0];
   const subPath = segments?.slice(1).join('/');

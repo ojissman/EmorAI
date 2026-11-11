@@ -1,4 +1,5 @@
 import { db } from '@/lib/db';
+import { recordCostForUsage } from '@/lib/billing';
 import type { TokenUsage } from '@/lib/types';
 
 export type RecordUsageInput = {
@@ -27,11 +28,16 @@ export type RecordUsageInput = {
 /**
  * Persists a usage record. When the call came through the developer API the
  * owning ApiKey row is bumped (requestCount / lastUsedAt) as well.
+ *
+ * After the row is written, cost accounting runs FIRE-AND-FORGET
+ * (recordCostForUsage — idempotent on the usage record id) using the routing
+ * attribution (routeId/providerAccountId) so cost lands on the account that
+ * actually served the request. Billing failures never break the request.
  */
 export async function recordUsage(input: RecordUsageInput): Promise<void> {
   const usage = input.usage;
   try {
-    await db.usageRecord.create({
+    const row = await db.usageRecord.create({
       data: {
         source: input.source,
         protocol: input.protocol ?? null,
@@ -58,6 +64,17 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
         data: { requestCount: { increment: 1 }, lastUsedAt: new Date() },
       });
     }
+    // Cost accounting + budget alert: never awaited, never thrown through.
+    void recordCostForUsage({
+      id: row.id,
+      apiKeyId: row.apiKeyId,
+      providerAccountId: row.providerAccountId,
+      modelId: row.modelId,
+      servedModel: row.servedModel,
+      promptTokens: row.promptTokens,
+      completionTokens: row.completionTokens,
+      routeId: row.routeId,
+    }).catch(() => undefined);
   } catch (e) {
     // Usage telemetry must never break the primary request.
     console.error('Failed to record usage:', e);

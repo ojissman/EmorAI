@@ -1,13 +1,17 @@
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { serializeConversation, serializeMessage } from '@/lib/serialize';
 
 export const runtime = 'nodejs';
 
 type Params = { params: Promise<{ id: string }> };
 
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const conversation = await db.conversation.findUnique({
     where: { id },
@@ -31,6 +35,9 @@ const patchSchema = z.object({
 });
 
 export async function PATCH(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   let body: unknown;
   try {
@@ -48,7 +55,10 @@ export async function PATCH(req: Request, { params }: Params) {
   }
 }
 
-export async function DELETE(_req: Request, { params }: Params) {
+export async function DELETE(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   try {
     await db.conversation.delete({ where: { id } });

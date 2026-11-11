@@ -8,6 +8,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Radar,
   Server,
   ShieldCheck,
   Trash2,
@@ -39,6 +40,7 @@ import {
   useValidateProvider,
 } from '@/hooks/use-emor-queries';
 import type { ProviderAccount, UpdateProviderInput } from '@/hooks/use-emor-queries';
+import { DiscoveryDialog } from './discovery-dialog';
 import { providerTypeLabel, timeAgo } from './provider-shared';
 
 /** Last validation outcome as a colored badge (ok / error / not checked). */
@@ -77,6 +79,7 @@ function ProviderAccountCard({ account }: { account: ProviderAccount }) {
 
   const [editing, setEditing] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [discoveryOpen, setDiscoveryOpen] = useState(false);
   const [draft, setDraft] = useState({
     name: account.name,
     baseUrl: account.baseUrl ?? '',
@@ -248,6 +251,15 @@ function ProviderAccountCard({ account }: { account: ProviderAccount }) {
           {validate.isPending ? <Loader2 className="size-3 animate-spin" /> : <ShieldCheck className="size-3" />}
           Validate
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1.5 text-xs"
+          onClick={() => setDiscoveryOpen(true)}
+          title="List the models this upstream offers, verify their metadata, and adopt selected ones (adopted models start unpublished)"
+        >
+          <Radar className="size-3" /> Discover
+        </Button>
         <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => setEditing((v) => !v)}>
           <Pencil className="size-3" /> Edit
         </Button>
@@ -374,6 +386,12 @@ function ProviderAccountCard({ account }: { account: ProviderAccount }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <DiscoveryDialog
+        account={{ id: account.id, name: account.name, providerType: account.providerType }}
+        open={discoveryOpen}
+        onOpenChange={setDiscoveryOpen}
+      />
     </div>
   );
 }

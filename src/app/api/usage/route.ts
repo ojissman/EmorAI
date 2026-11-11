@@ -1,11 +1,15 @@
 import { db } from '@/lib/db';
 import { ok } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { serializeUsageRecord } from '@/lib/serialize';
 
 export const runtime = 'nodejs';
 
 /** Aggregated usage analytics for the dashboard + recent records. */
 export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const url = new URL(req.url);
   const days = Math.min(Math.max(Number(url.searchParams.get('days') ?? '30'), 1), 365);
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);

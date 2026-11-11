@@ -202,18 +202,30 @@ export async function listEnabledModels(): Promise<ModelInfo[]> {
  *      /v1/models and the response reports the actual registry model + the
  *      served provider model — never a silent substitution)
  * Case-insensitive fallback because coding agents frequently normalise IDs.
+ *
+ * Customer resolution (default) EXCLUDES disabled models: adoption creates
+ * ModelConfig rows with enabled=false, and an unpublished model must be
+ * invisible to customers until the administrator flips it on. Pass
+ * { allowDisabled: true } for administrative surfaces (route previews,
+ * probing) that must see the whole registry. The admin models listing
+ * (listModels) is unaffected and always returns every row.
  */
-export async function resolveModel(requested: string): Promise<{ model: ModelInfo; viaAlias: string | null } | null> {
+export async function resolveModel(
+  requested: string,
+  opts: { allowDisabled?: boolean } = {}
+): Promise<{ model: ModelInfo; viaAlias: string | null } | null> {
   await ensureRegistrySeeded();
+  const allowDisabled = opts.allowDisabled === true;
   const exact = await db.modelConfig.findUnique({ where: { modelId: requested } });
-  if (exact) return { model: toModelInfo(exact), viaAlias: null };
+  if (exact && (exact.enabled || allowDisabled)) return { model: toModelInfo(exact), viaAlias: null };
 
   const all = await listModels();
   const lower = requested.toLowerCase();
-  const byLower = all.find((m) => m.modelId.toLowerCase() === lower);
+  const byLower = all.find((m) => (m.enabled || allowDisabled) && m.modelId.toLowerCase() === lower);
   if (byLower) return { model: byLower, viaAlias: null };
 
   for (const m of all) {
+    if (!(m.enabled || allowDisabled)) continue;
     if (m.aliases.some((a) => a.toLowerCase() === lower)) {
       return { model: m, viaAlias: requested };
     }

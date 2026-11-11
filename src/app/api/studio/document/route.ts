@@ -4,6 +4,7 @@ import { getSettings } from '@/lib/settings';
 import { getModelInfoByModelId, listEnabledModels } from '@/lib/model-registry';
 import { rateLimit } from '@/lib/rate-limit';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { completeChat } from '@/lib/ai/zai-adapter';
 import { markdownToDocx, htmlToPdf, writeArtifactFile } from '@/lib/ai/media';
 import { serializeArtifact } from '@/lib/artifacts';
@@ -53,6 +54,9 @@ function mimeFor(format: 'md' | 'html' | 'docx' | 'pdf'): string {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

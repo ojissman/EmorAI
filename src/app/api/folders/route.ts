@@ -1,11 +1,15 @@
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { serializeFolder } from '@/lib/serialize';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const folders = await db.folder.findMany({ orderBy: { createdAt: 'asc' } });
   return ok({ folders: folders.map(serializeFolder) });
 }
@@ -16,6 +20,9 @@ const createSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

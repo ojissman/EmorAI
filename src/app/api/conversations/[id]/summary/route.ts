@@ -2,6 +2,7 @@ import { db } from '@/lib/db';
 import { getSettings } from '@/lib/settings';
 import { getModelInfoByModelId } from '@/lib/model-registry';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { completeChat } from '@/lib/ai/zai-adapter';
 import { recordUsage, estimateUsage } from '@/lib/usage';
 
@@ -11,7 +12,10 @@ export const maxDuration = 120;
 type Params = { params: Promise<{ id: string }> };
 
 /** Conversation summarization capability: condenses a conversation into a brief. */
-export async function POST(_req: Request, { params }: Params) {
+export async function POST(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const conversation = await db.conversation.findUnique({
     where: { id },

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { getSettings } from '@/lib/settings';
 import { rateLimit } from '@/lib/rate-limit';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { synthesizeSpeech, TTS_VOICES } from '@/lib/ai/media';
 
 export const runtime = 'nodejs';
@@ -23,6 +24,9 @@ function ipOf(req: Request): string {
 
 /** Text → speech stream for read-aloud in chat (ephemeral, not archived). */
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

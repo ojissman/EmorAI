@@ -7,28 +7,40 @@
 //   1. public model resolved upstream (registry + aliases — unchanged)
 //   2. candidate routes loaded (enabled route + enabled account)
 //   3. eligibility per route: known-bad health rejected, capability subset
-//      verified, stored credentials must decrypt, adapter must exist
-//   4. score (strategy-aware): priority + account priority + health recency
-//      + weight — deterministic, documented, admin-tunable via route fields
-//   5. execute via the route's adapter; on a retryable failure BEFORE any
-//      output has been produced → fail over to the next eligible route
-//      (public model identity is preserved); after output → surface the error
-//      (never duplicate user-visible output or billing)
+//      verified, stored credentials must decrypt, adapter must exist, and
+//      — when budgets are enforced — the account must be under its monthly
+//      budget (ONE batched spend query for the whole plan, never per route)
+//   4. score (strategy-aware): priority + account priority + health recency;
+//      the cost strategy uses REAL per-MTok pricing (effective CostRate or
+//      ModelConfig.pricing) — route.weight is no longer a cost signal
+//   5. execute via the route's adapter under bounded concurrency (in-process
+//      account+route slots — every attempt holds a lease released in finally,
+//      including on consumer abort); on a retryable failure BEFORE any output
+//      has been produced → fail over to the next eligible route (public model
+//      identity is preserved); after output → surface the error (never
+//      duplicate user-visible output or billing)
 //   6. every decision logged to RoutingDecision; execution outcomes update
 //      route + account health; the caller gets attribution for UsageRecord
+//      (and therefore for CostLedger accounting + budget enforcement)
 //
 // LEGACY PATH: models with no routes (e.g. directly-exposed provider models
 // like glm-5.3) execute exactly as before — the router delegates straight to
-// the zai adapter with the registry modelId. Zero behavior change.
+// the zai adapter with the registry modelId. Zero behavior change. The
+// platform-managed zai account is deliberately NOT concurrency-enforced
+// (its capacity is managed by the platform SDK environment, not by admin
+// config); every stored-credential account IS enforced.
 
 import { db } from '@/lib/db';
 import { resolveModel } from '@/lib/model-registry';
 import { getAdapterByType, adapterContextForAccount } from '@/lib/ai/providers';
 import type { AIProviderAdapter, AdapterContext, StreamChatOptions, StreamEvent, CompleteChatResult } from '@/lib/ai/providers';
-import type { ModelCapabilities, ModelInfo, RoutingStrategyName } from '@/lib/types';
+import type { ModelCapabilities, ModelInfo, RoutingStrategyName, AppSettings } from '@/lib/types';
 import { DEFAULT_CAPABILITIES } from '@/lib/types';
-import { getSettings } from '@/lib/settings';
+import { DEFAULT_SETTINGS, getSettings } from '@/lib/settings';
 import { ProviderError } from '@/lib/ai/zai-adapter';
+import { acquireSlots, ConcurrencyExhaustedError, type SlotLease } from '@/lib/ai/concurrency';
+import { budgetStatusMapFor, effectiveRatesForModel, alertBudgetExceededBatch, type AccountBudgetStatus } from '@/lib/billing';
+import { addScaled, microToDecimalString, parseDecimalString, type ScaledDecimal } from '@/lib/money';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,8 +59,11 @@ export type RoutingStrategy = RoutingStrategyName;
 // Strategies:
 //   balanced    — priority + account priority + health recency + weight blend
 //   priority    — pure configured order (route.priority, then account priority)
-//   cost        — lowest admin-configured route weight first (weight is the
-//                 honest cost proxy; pricing metadata is never invented)
+//   cost        — REAL pricing: blended (input + output) per-MTok price of the
+//                 public model resolved per candidate account (effective
+//                 CostRate overrides ModelConfig.pricing). Unknown pricing →
+//                 NEUTRAL score + pricingKnown:false marker — never invented,
+//                 and route.weight is never used as a fake cost signal.
 //   performance — lowest recently *measured* execution latency first
 //                 (routes never measured use a neutral 1200 ms prior)
 const STRATEGY_SCORE_PRIOR_MS = 1200;
@@ -90,6 +105,8 @@ type Candidate = {
   ctx: AdapterContext;
   routeCaps: ModelCapabilities;
   score: number;
+  // cost strategy only: true when real pricing resolved for this candidate
+  pricingKnown: boolean;
 };
 
 export type ExecutionRequest = {
@@ -98,7 +115,24 @@ export type ExecutionRequest = {
   needs: { vision: boolean; tools: boolean; streaming: boolean };
 };
 
-// ─── Eligibility + scoring ──────────────────────────────────────────────────
+// ─── Settings (never throws — routing must survive settings failures) ────────
+
+async function loadSettingsSafe(): Promise<AppSettings> {
+  try {
+    return await getSettings();
+  } catch {
+    // documented defaults (budget enforced, queue-mode concurrency) apply
+    return DEFAULT_SETTINGS;
+  }
+}
+
+/** The strategy configured by the administrator (AppSetting, default balanced). */
+export async function currentRoutingStrategy(): Promise<RoutingStrategy> {
+  const settings = await loadSettingsSafe();
+  return settings.routingStrategy;
+}
+
+// ─── Eligibility + scoring ───────────────────────────────────────────────────
 
 function routeCapabilities(route: RouteRow, modelCaps: ModelCapabilities): ModelCapabilities {
   const raw = route.capabilities as Partial<ModelCapabilities> | null;
@@ -108,7 +142,12 @@ function routeCapabilities(route: RouteRow, modelCaps: ModelCapabilities): Model
   return { ...DEFAULT_CAPABILITIES, ...raw };
 }
 
-function eligible(route: RouteRow, model: ModelInfo, req: ExecutionRequest): { ok: boolean; reason?: string } {
+function eligible(
+  route: RouteRow,
+  model: ModelInfo,
+  req: ExecutionRequest,
+  budgets: Map<string, AccountBudgetStatus> | null
+): { ok: boolean; reason?: string } {
   if (!route.enabled) return { ok: false, reason: 'route disabled' };
   if (!route.providerAccount.enabled) return { ok: false, reason: 'account disabled' };
   if (route.providerAccount.lastStatus === 'error') {
@@ -116,6 +155,18 @@ function eligible(route: RouteRow, model: ModelInfo, req: ExecutionRequest): { o
   }
   if (route.healthStatus === 'down') {
     return { ok: false, reason: `route marked down: ${(route.lastError ?? '').slice(0, 120)}` };
+  }
+  // budget pre-check (only injected when settings.budget.enforce): one
+  // precomputed Map of accountId → over-budget, built with ONE batched query
+  // in planCandidates — never N queries per route
+  if (budgets) {
+    const b = budgets.get(route.providerAccountId);
+    if (b && b.overBudget && b.budgetMicro !== null) {
+      return {
+        ok: false,
+        reason: `budget_exhausted: spent ${microToDecimalString(b.spentMicro)} of ${microToDecimalString(b.budgetMicro)} this month`,
+      };
+    }
   }
   const adapter = getAdapterByType(route.providerAccount.providerType);
   if (!adapter) return { ok: false, reason: `no adapter registered for provider "${route.providerAccount.providerType}"` };
@@ -130,27 +181,41 @@ function eligible(route: RouteRow, model: ModelInfo, req: ExecutionRequest): { o
   return { ok: true };
 }
 
-/** The strategy configured by the administrator (AppSetting, default balanced). */
-export async function currentRoutingStrategy(): Promise<RoutingStrategy> {
-  try {
-    const settings = await getSettings();
-    return settings.routingStrategy;
-  } catch {
-    return 'balanced'; // settings read must never break routing
-  }
+/**
+ * Blended per-MTok price (input + output) for one candidate route, exact
+ * BigInt math. null ⇒ pricing unknown (never invented).
+ */
+function candidateCostBlend(
+  priceByAccount: Map<string, { inputPerMTok: string; outputPerMTok: string }> | null,
+  route: RouteRow
+): ScaledDecimal | null {
+  if (!priceByAccount) return null;
+  const rate = priceByAccount.get(route.providerAccountId);
+  if (!rate) return null;
+  const inP = parseDecimalString(rate.inputPerMTok);
+  const outP = parseDecimalString(rate.outputPerMTok);
+  if (!inP || !outP) return null;
+  return addScaled(inP, outP);
 }
 
 /** Deterministic route score (lower = preferred). Strategy-aware. */
-function scoreRoute(route: RouteRow, strategy: RoutingStrategy): number {
+function scoreRoute(route: RouteRow, strategy: RoutingStrategy, costBlend: ScaledDecimal | null): number {
   const base = route.priority * 100 + route.providerAccount.priority * 10;
   switch (strategy) {
     case 'priority':
       // pure configured order — no health/weight adjustments
       return base;
-    case 'cost':
-      // weight is the admin-configured cost proxy (default 1.0); lower first.
-      // Priority only breaks ties — cost dominates.
-      return Math.round(route.weight * 1000) + base;
+    case 'cost': {
+      // REAL pricing only: blended (input+output) per-MTok price for THIS
+      // public model on THIS account's effective rate (account-scoped CostRate
+      // → model-wide CostRate → ModelConfig.pricing). Unknown pricing is
+      // NEUTRAL (base score only, pricingKnown:false in the decision log) —
+      // pricing is never invented and route.weight is not a cost signal.
+      if (costBlend === null) return base;
+      // float conversion is for ORDERING ONLY — money math stays in BigInt
+      const blend = Number(costBlend.scaled) / 10 ** costBlend.scale;
+      return Math.round(blend * 1000) + base; // cost dominates; priority breaks ties
+    }
     case 'performance': {
       // Measured recent execution latency only — never guessed. Unmeasured
       // routes get a neutral prior so they are not permanently starved.
@@ -171,7 +236,11 @@ function scoreRoute(route: RouteRow, strategy: RoutingStrategy): number {
 }
 
 /** Loads + verifies + orders every candidate route for a public model. */
-async function planCandidates(model: ModelInfo, req: ExecutionRequest, strategy: RoutingStrategy): Promise<{
+async function planCandidates(
+  model: ModelInfo,
+  req: ExecutionRequest,
+  ctx: { strategy: RoutingStrategy; budgetEnforced: boolean }
+): Promise<{
   candidates: Candidate[];
   rejected: Array<{ routeId: string; upstreamModel: string; reason: string }>;
 }> {
@@ -181,27 +250,74 @@ async function planCandidates(model: ModelInfo, req: ExecutionRequest, strategy:
     orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
   })) as unknown as RouteRow[];
 
+  // budget pre-check: ONE batched ledger query for every account reachable
+  // from this model's routes (never per route)
+  let budgets: Map<string, AccountBudgetStatus> | null = null;
+  if (ctx.budgetEnforced) {
+    budgets = await budgetStatusMapFor(
+      routes.map((r) => ({ id: r.providerAccountId, monthlyBudget: r.providerAccount.monthlyBudget })),
+      true
+    );
+    // over-budget flip → critical AlertEvent (fire-and-forget; once per hour
+    // per account — the guard lives in alertBudgetExceededBatch)
+    const over = [...routes]
+      .map((r) => ({ route: r, status: budgets!.get(r.providerAccountId) }))
+      .filter((e) => e.status && e.status.overBudget && e.status.enforced && e.status.budgetMicro !== null);
+    if (over.length > 0) {
+      void alertBudgetExceededBatch(
+        over.map((e) => ({
+          accountId: e.route.providerAccountId,
+          accountName: e.route.providerAccount.name,
+          spentMicro: e.status!.spentMicro,
+          budgetMicro: e.status!.budgetMicro!,
+          currency: e.status!.currency,
+        }))
+      ).catch(() => undefined);
+    }
+  }
+
+  // real pricing for the cost strategy: ONE CostRate query for the whole
+  // model — account-scoped rates override the model-wide rate (which itself
+  // falls back to ModelConfig.pricing inside effectiveRatesForModel)
+  const rates =
+    ctx.strategy === 'cost' ? await effectiveRatesForModel(model.modelId, model.pricing) : null;
+  const priceByAccount: Map<string, { inputPerMTok: string; outputPerMTok: string }> | null = rates
+    ? (() => {
+        const m = new Map<string, { inputPerMTok: string; outputPerMTok: string }>();
+        if (rates.modelWide) {
+          const wide = { inputPerMTok: rates.modelWide.inputPerMTok, outputPerMTok: rates.modelWide.outputPerMTok };
+          for (const r of routes) m.set(r.providerAccountId, wide);
+        }
+        for (const [accId, rate] of rates.accountRates) {
+          m.set(accId, { inputPerMTok: rate.inputPerMTok, outputPerMTok: rate.outputPerMTok });
+        }
+        return m;
+      })()
+    : null;
+
   const candidates: Candidate[] = [];
   const rejected: Array<{ routeId: string; upstreamModel: string; reason: string }> = [];
   for (const route of routes) {
-    const check = eligible(route, model, req);
+    const check = eligible(route, model, req, budgets);
     if (!check.ok) {
       rejected.push({ routeId: route.id, upstreamModel: route.upstreamModelId, reason: check.reason ?? 'ineligible' });
       continue;
     }
-    let ctx: AdapterContext;
+    let ctxAccount: AdapterContext;
     try {
-      ctx = adapterContextForAccount(route.providerAccount);
+      ctxAccount = adapterContextForAccount(route.providerAccount);
     } catch (e) {
       rejected.push({ routeId: route.id, upstreamModel: route.upstreamModelId, reason: `credentials undecryptable: ${String((e as Error)?.message ?? e).slice(0, 120)}` });
       continue;
     }
+    const costBlend = candidateCostBlend(priceByAccount, route);
     candidates.push({
       route,
       adapter: getAdapterByType(route.providerAccount.providerType)!,
-      ctx,
+      ctx: ctxAccount,
       routeCaps: routeCapabilities(route, model.capabilities),
-      score: scoreRoute(route, strategy),
+      score: scoreRoute(route, ctx.strategy, costBlend),
+      pricingKnown: ctx.strategy !== 'cost' || costBlend !== null,
     });
   }
   candidates.sort((a, b) => a.score - b.score);
@@ -235,6 +351,8 @@ async function recordDecision(input: {
             account: c.route.providerAccount.name,
             score: c.score,
             rejected: false,
+            // cost strategy honesty marker: false ⇒ no real pricing resolved
+            pricingKnown: c.pricingKnown,
           })),
           ...input.rejected.map((r) => ({ ...r, providerType: 'unknown', account: 'unknown', score: 0, rejected: true })),
         ],
@@ -300,15 +418,27 @@ function failoverWorthy(err: ProviderError): boolean {
   }
 }
 
-// ─── Legacy direct path (models without routes) ─────────────────────────────
+/** Maps a local concurrency exhaustion to its customer-facing shape. */
+function concurrencyToProviderError(e: ConcurrencyExhaustedError): ProviderError {
+  return new ProviderError('rate_limited', 'concurrency limit reached for account/route', {
+    status: 503,
+    retryable: true,
+  });
+}
+
+// ─── Legacy direct path (models without routes) ──────────────────────────────
 
 async function* directStream(model: ModelInfo, opts: StreamChatOptions): AsyncGenerator<StreamEvent> {
-  // preserve the exact pre-router behavior: registry modelId straight to zai
+  // preserve the exact pre-router behavior: registry modelId straight to zai.
+  // Deliberately NOT concurrency-enforced: the zai account is platform-managed
+  // (credentialMode "platform" — capacity is governed by the platform SDK
+  // environment, not by per-account admin limits).
   const { streamChat } = await import('@/lib/ai/zai-adapter');
   yield* streamChat({ ...opts, modelId: model.modelId, provider: model.provider });
 }
 
 async function directComplete(model: ModelInfo, opts: StreamChatOptions): Promise<CompleteChatResult> {
+  // see directStream: platform-managed account — unenforced by design
   const { completeChat } = await import('@/lib/ai/zai-adapter');
   return completeChat({ ...opts, modelId: model.modelId, provider: model.provider });
 }
@@ -320,7 +450,7 @@ export type RoutedStreamPlan = {
   viaAlias: string | null;
   strategy: RoutingStrategy;
   routed: boolean;
-  candidates: Array<{ routeId: string; upstreamModel: string; providerType: string; account: string; score: number }>;
+  candidates: Array<{ routeId: string; upstreamModel: string; providerType: string; account: string; score: number; pricingKnown?: boolean }>;
   rejected: Array<{ routeId: string; upstreamModel: string; reason: string }>;
 };
 
@@ -328,21 +458,22 @@ export type RoutedStreamPlan = {
  * Resolves a public model + its execution plan (candidates in score order).
  * Use when the caller needs the plan before streaming (e.g. capability gates).
  * Legacy models return routed=false and execute through the direct path.
+ * Admin surface: resolves disabled models too (route previews must see them).
  */
 export async function planExecution(requestedModelId: string): Promise<RoutedStreamPlan | null> {
-  const resolved = await resolveModel(requestedModelId);
+  const resolved = await resolveModel(requestedModelId, { allowDisabled: true });
   if (!resolved) return null;
   const model = resolved.model;
-  const strategy = await currentRoutingStrategy();
+  const settings = await loadSettingsSafe();
   const { candidates, rejected } = await planCandidates(
     model,
     { requestId: 'plan', needs: { vision: false, tools: false, streaming: true } },
-    strategy
+    { strategy: settings.routingStrategy, budgetEnforced: settings.budget.enforce }
   );
   return {
     model,
     viaAlias: resolved.viaAlias,
-    strategy,
+    strategy: settings.routingStrategy,
     routed: candidates.length > 0,
     candidates: candidates.map((c) => ({
       routeId: c.route.id,
@@ -350,6 +481,7 @@ export async function planExecution(requestedModelId: string): Promise<RoutedStr
       providerType: c.route.providerAccount.providerType,
       account: c.route.providerAccount.name,
       score: c.score,
+      pricingKnown: c.pricingKnown,
     })),
     rejected,
   };
@@ -371,25 +503,42 @@ export async function* streamChatRouted(
     throw new ProviderError('model_unavailable', `Model "${requestedModelId}" does not exist in this EmorAI installation.`, { status: 404 });
   }
   const model = resolved.model;
-  const strategy = await currentRoutingStrategy();
+  const settings = await loadSettingsSafe();
+  const strategy = settings.routingStrategy;
   const req: ExecutionRequest = { requestId: opts.requestId, needs: { ...needs, streaming: true } };
-  const { candidates, rejected } = await planCandidates(model, req, strategy);
+  const { candidates, rejected } = await planCandidates(model, req, {
+    strategy,
+    budgetEnforced: settings.budget.enforce,
+  });
 
   if (candidates.length === 0) {
     // EmorAI family models REQUIRE a configured eligible route — never
-    // silently fall through to a direct upstream call.
+    // silently fall through to a direct upstream call. The rejection reasons
+    // (budget_exhausted, disabled, capability gaps…) are ALWAYS recorded —
+    // a no-candidate rejection is still a routing decision with an audit trail.
     if (model.category === 'emorai') {
+      void recordDecision({
+        requestId: opts.requestId, modelId: model.modelId, strategy,
+        candidates: [], rejected, attribution: { ...attribution, routed: false },
+        finalStatus: 'failed', errorText: 'no eligible route configured',
+      });
       throw new ProviderError(
         'model_unavailable',
         `Model "${model.modelId}" has no eligible route configured. Add or enable a route in Settings → Routes.`,
         { status: 501 }
       );
     }
-    // legacy direct path — zero behavior change for un-routed provider models
+    // legacy direct path — zero behavior change for un-routed zai provider
+    // models (glm-5.3-flash and friends; the dashboard default depends on it)
     if (model.provider !== 'zai') {
+      void recordDecision({
+        requestId: opts.requestId, modelId: model.modelId, strategy,
+        candidates: [], rejected, attribution: { ...attribution, routed: false },
+        finalStatus: 'failed', errorText: 'no eligible route to an authorized provider account',
+      });
       throw new ProviderError(
         'model_unavailable',
-        `Model "${model.modelId}" routes to provider "${model.provider}", which is not configured on this installation.`,
+        `Model "${model.modelId}" (provider "${model.provider}") has no route to an authorized provider account — adopt it via Provider discovery (Settings → Providers) or configure a route in Settings → Routes.`,
         { status: 501 }
       );
     }
@@ -429,8 +578,9 @@ export async function* streamChatRouted(
   // routed path: try candidates in order; fail over only before first output.
   // A sustained rate limit is account-wide upstream — retrying OTHER routes on
   // the SAME account just restarts the full backoff storm against the same
-  // limit, so once an account comes back rate_limited its remaining routes are
-  // skipped and only genuinely different accounts are tried.
+  // limit, so once an account comes back rate-limited (or exhausts its
+  // ACCOUNT concurrency slot) its remaining routes are skipped and only
+  // genuinely different accounts are tried.
   attribution.routed = true;
   let emittedOutput = false;
   let lastError: ProviderError | null = null;
@@ -453,16 +603,31 @@ export async function* streamChatRouted(
     attribution.attempts = (attribution.attempts ?? 0) + 1;
     attribution.failedCandidates = attribution.failedCandidates ?? [];
     let producedOutput = false;
+    let lease: SlotLease | null = null;
     const attemptStart = Date.now();
     try {
-      const routeOpts: StreamChatOptions = {
-        ...opts,
-        modelId: c.route.upstreamModelId,
-        timeoutMs: opts.timeoutMs ?? c.route.timeoutMs,
-      };
-      for await (const ev of c.adapter.streamChat(c.ctx, routeOpts)) {
-        if (ev.type === 'delta' || ev.type === 'tool-call-delta') producedOutput = true;
-        yield ev;
+      // Concurrency gate: bounded in-process slots for the account (and this
+      // route when maxConcurrency > 0). Lease release is GUARANTEED by the
+      // finally below — it runs on success, on error, AND on consumer abort
+      // (the for-await return/throw propagates into the finally).
+      lease = await acquireSlots({
+        accountId: c.route.providerAccountId,
+        accountMax: c.route.providerAccount.maxConcurrency,
+        routeId: c.route.id,
+        routeMax: c.route.maxConcurrency,
+      });
+      try {
+        const routeOpts: StreamChatOptions = {
+          ...opts,
+          modelId: c.route.upstreamModelId,
+          timeoutMs: opts.timeoutMs ?? c.route.timeoutMs,
+        };
+        for await (const ev of c.adapter.streamChat(c.ctx, routeOpts)) {
+          if (ev.type === 'delta' || ev.type === 'tool-call-delta') producedOutput = true;
+          yield ev;
+        }
+      } finally {
+        lease?.release();
       }
       producedOutput &&= true;
       // success: mark healthy + served (with this attempt's measured latency)
@@ -479,6 +644,20 @@ export async function* streamChatRouted(
       });
       return;
     } catch (e) {
+      if (e instanceof ConcurrencyExhaustedError) {
+        // local capacity, not upstream health: no route/account health marks,
+        // but the candidate is recorded and failover is allowed (the next
+        // route may have free capacity)
+        const err = concurrencyToProviderError(e);
+        lastError = err;
+        attribution.failedCandidates!.push({
+          routeId: c.route.id,
+          reason: `concurrency_exhausted: ${e.message}`,
+        });
+        if (e.keys.some((k) => k.startsWith('account:'))) rateLimitedAccounts.add(c.route.providerAccountId);
+        if (i < candidates.length - 1) continue;
+        break;
+      }
       const err = e instanceof ProviderError ? e : new ProviderError('provider_error', String((e as Error)?.message ?? e), { status: 502, retryable: true });
       lastError = err;
       emittedOutput = emittedOutput || producedOutput;
@@ -520,12 +699,23 @@ export async function completeChatRouted(
     throw new ProviderError('model_unavailable', `Model "${requestedModelId}" does not exist in this EmorAI installation.`, { status: 404 });
   }
   const model = resolved.model;
-  const strategy = await currentRoutingStrategy();
+  const settings = await loadSettingsSafe();
+  const strategy = settings.routingStrategy;
   const req: ExecutionRequest = { requestId: opts.requestId, needs: { ...needs, streaming: false } };
-  const { candidates, rejected } = await planCandidates(model, req, strategy);
+  const { candidates, rejected } = await planCandidates(model, req, {
+    strategy,
+    budgetEnforced: settings.budget.enforce,
+  });
 
   if (candidates.length === 0) {
+    // rejection reasons are always recorded — audit trail for budget/disabled/
+    // capability rejections even when no candidate ever ran
     if (model.category === 'emorai') {
+      void recordDecision({
+        requestId: opts.requestId, modelId: model.modelId, strategy,
+        candidates: [], rejected, attribution: { ...attribution, routed: false },
+        finalStatus: 'failed', errorText: 'no eligible route configured',
+      });
       throw new ProviderError(
         'model_unavailable',
         `Model "${model.modelId}" has no eligible route configured. Add or enable a route in Settings → Routes.`,
@@ -533,9 +723,14 @@ export async function completeChatRouted(
       );
     }
     if (model.provider !== 'zai') {
+      void recordDecision({
+        requestId: opts.requestId, modelId: model.modelId, strategy,
+        candidates: [], rejected, attribution: { ...attribution, routed: false },
+        finalStatus: 'failed', errorText: 'no eligible route to an authorized provider account',
+      });
       throw new ProviderError(
         'model_unavailable',
-        `Model "${model.modelId}" routes to provider "${model.provider}", which is not configured on this installation.`,
+        `Model "${model.modelId}" (provider "${model.provider}") has no route to an authorized provider account — adopt it via Provider discovery (Settings → Providers) or configure a route in Settings → Routes.`,
         { status: 501 }
       );
     }
@@ -577,13 +772,26 @@ export async function completeChatRouted(
     attribution.upstreamModel = c.route.upstreamModelId;
     attribution.attempts = (attribution.attempts ?? 0) + 1;
     attribution.failedCandidates = attribution.failedCandidates ?? [];
+    let lease: SlotLease | null = null;
     const attemptStart = Date.now();
+    let result: CompleteChatResult | null = null;
     try {
-      const result = await c.adapter.completeChat(c.ctx, {
-        ...opts,
-        modelId: c.route.upstreamModelId,
-        timeoutMs: opts.timeoutMs ?? c.route.timeoutMs,
+      lease = await acquireSlots({
+        accountId: c.route.providerAccountId,
+        accountMax: c.route.providerAccount.maxConcurrency,
+        routeId: c.route.id,
+        routeMax: c.route.maxConcurrency,
       });
+      try {
+        result = await c.adapter.completeChat(c.ctx, {
+          ...opts,
+          modelId: c.route.upstreamModelId,
+          timeoutMs: opts.timeoutMs ?? c.route.timeoutMs,
+        });
+      } finally {
+        lease?.release(); // guaranteed on success, error, and caller abort
+      }
+      // success: mark healthy + served, log the routed decision
       void markRouteServed(c.route.id, c.route.providerAccountId, Date.now() - attemptStart);
       void recordDecision({
         requestId: opts.requestId, modelId: model.modelId, strategy,
@@ -591,6 +799,19 @@ export async function completeChatRouted(
       });
       return result;
     } catch (e) {
+      if (e instanceof ConcurrencyExhaustedError) {
+        // local capacity, not upstream health; failover to the next route is
+        // allowed (it may have free capacity)
+        const err = concurrencyToProviderError(e);
+        lastError = err;
+        attribution.failedCandidates!.push({
+          routeId: c.route.id,
+          reason: `concurrency_exhausted: ${e.message}`,
+        });
+        if (e.keys.some((k) => k.startsWith('account:'))) rateLimitedAccounts.add(c.route.providerAccountId);
+        if (i < candidates.length - 1) continue;
+        break;
+      }
       const err = e instanceof ProviderError ? e : new ProviderError('provider_error', String((e as Error)?.message ?? e), { status: 502, retryable: true });
       lastError = err;
       attribution.failedCandidates!.push({ routeId: c.route.id, reason: `${err.code}: ${err.message.slice(0, 160)}` });

@@ -67,6 +67,35 @@ export type RoutingStrategyName = 'balanced' | 'priority' | 'cost' | 'performanc
 
 export const ROUTING_STRATEGIES: RoutingStrategyName[] = ['balanced', 'priority', 'cost', 'performance'];
 
+export type NetworkSettings = {
+  // explicitly authorized private endpoints (hostnames or IPs) — admin-controlled
+  // allowlist enabling legitimate self-hosted inference behind private networks
+  allowlist: string[];
+  // require https for every non-allowlisted external destination
+  requireHttps: boolean;
+  // hard cap on response body bytes (protects against oversized responses)
+  maxResponseBytes: number;
+};
+
+export type ConcurrencySettings = {
+  // queue (wait for a slot) | reject (immediate 429-style rejection)
+  mode: 'queue' | 'reject';
+  // max time a queued request waits when mode = queue
+  queueWaitMs: number;
+};
+
+export type BudgetSettings = {
+  // enforce account monthly budgets (pre-check + post-accounting)
+  enforce: boolean;
+};
+
+export type JobsSettings = {
+  // provider health-check interval (minutes)
+  healthCheckMin: number;
+  // model re-sync interval (hours)
+  modelSyncHrs: number;
+};
+
 export type AppSettings = {
   defaultModelId: string;
   systemInstructions: string;
@@ -78,6 +107,10 @@ export type AppSettings = {
   dashboardRateLimitPerMin: number;
   titleGeneration: boolean;
   routingStrategy: RoutingStrategyName;
+  network: NetworkSettings;
+  concurrency: ConcurrencySettings;
+  budget: BudgetSettings;
+  jobs: JobsSettings;
 };
 
 export type TokenUsage = {

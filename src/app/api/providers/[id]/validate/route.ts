@@ -1,5 +1,6 @@
 import { db } from '@/lib/db';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { getAdapterByType, adapterContextForAccount } from '@/lib/ai/providers';
 
 export const runtime = 'nodejs';
@@ -7,7 +8,10 @@ export const runtime = 'nodejs';
 type Params = { params: Promise<{ id: string }> };
 
 /** Validates an account's credentials with a real (non-billable) provider call. */
-export async function POST(_req: Request, { params }: Params) {
+export async function POST(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const account = await db.providerAccount.findUnique({ where: { id } });
   if (!account) return fail(404, 'not_found', 'Provider account not found.');

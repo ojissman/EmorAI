@@ -1,12 +1,16 @@
 import { db } from '@/lib/db';
 import { ok } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 
 export const runtime = 'nodejs';
 
 const EXPORT_VERSION = 1;
 
 /** Exports every conversation + message as a portable JSON document. */
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const conversations = await db.conversation.findMany({
     orderBy: { createdAt: 'asc' },
     include: { messages: { orderBy: { createdAt: 'asc' } } },

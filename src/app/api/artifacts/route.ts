@@ -1,10 +1,14 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { serializeArtifact, ARTIFACT_KINDS } from '@/lib/artifacts';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const url = new URL(req.url);
   const kindsParam = url.searchParams.get('kinds') ?? '';
   const limitParam = Number(url.searchParams.get('limit') ?? '60');
@@ -27,6 +31,9 @@ export async function GET(req: Request) {
   return Response.json({ artifacts: artifacts.map((a) => serializeArtifact(a)) });
 }
 
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   return fail(405, 'method_not_allowed', 'Delete a specific artifact via /api/artifacts/[id].');
 }

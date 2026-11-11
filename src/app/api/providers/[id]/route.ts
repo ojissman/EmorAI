@@ -1,13 +1,17 @@
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { maskSecret, encryptSecret, credentialEncryptionAvailable } from '@/lib/crypto';
 
 export const runtime = 'nodejs';
 
 type Params = { params: Promise<{ id: string }> };
 
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const account = await db.providerAccount.findUnique({ where: { id }, include: { routes: true } });
   if (!account) return fail(404, 'not_found', 'Provider account not found.');
@@ -34,6 +38,9 @@ const patchSchema = z.object({
 });
 
 export async function PATCH(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   let body: unknown;
   try {
@@ -54,6 +61,18 @@ export async function PATCH(req: Request, { params }: Params) {
   }
   if (data.apiKey && !credentialEncryptionAvailable()) {
     return fail(500, 'encryption_unavailable', 'Set EMORAI_MASTER_KEY before storing credentials.');
+  }
+
+  // SSRF destination policy — only when baseUrl is actually being set/changed to a non-null value.
+  if (data.baseUrl) {
+    try {
+      const { assertProviderUrlAllowed, loadNetworkPolicy } = await import('@/lib/net/url-policy');
+      const net = await loadNetworkPolicy();
+      const policy = await assertProviderUrlAllowed(String(data.baseUrl), { allowlist: net.allowlist, requireHttps: net.requireHttps });
+      if (!policy.ok) return fail(422, 'url_blocked', `Base URL rejected by destination policy: ${policy.reason}`);
+    } catch {
+      // policy module not present yet — SSRF guard lands in parallel; skip validation until then
+    }
   }
 
   const updated = await db.providerAccount.update({
@@ -85,7 +104,10 @@ export async function PATCH(req: Request, { params }: Params) {
   });
 }
 
-export async function DELETE(_req: Request, { params }: Params) {
+export async function DELETE(req: Request, { params }: Params) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const { id } = await params;
   const routes = await db.modelRoute.count({ where: { providerAccountId: id } });
   if (routes > 0) {

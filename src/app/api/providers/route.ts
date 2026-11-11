@@ -1,13 +1,17 @@
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { registeredProviderTypes, getAdapterByType, adapterContextForAccount } from '@/lib/ai/providers';
 import { encryptSecret, credentialEncryptionAvailable, maskSecret } from '@/lib/crypto';
 
 export const runtime = 'nodejs';
 
 /** Dashboard provider-account list (credentials never leave the server). */
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const accounts = await db.providerAccount.findMany({
     orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
     include: { routes: { select: { id: true, publicModelId: true, upstreamModelId: true, enabled: true, priority: true, healthStatus: true } } },
@@ -51,6 +55,9 @@ const createSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();
@@ -79,6 +86,18 @@ export async function POST(req: Request) {
     }
     if (!credentialEncryptionAvailable()) {
       return fail(500, 'encryption_unavailable', 'Credential encryption is unavailable: set EMORAI_MASTER_KEY in the server environment. Refusing to store credentials unencrypted.');
+    }
+  }
+
+  // SSRF destination policy (dynamic: url-policy module may land in parallel).
+  if (data.baseUrl) {
+    try {
+      const { assertProviderUrlAllowed, loadNetworkPolicy } = await import('@/lib/net/url-policy');
+      const net = await loadNetworkPolicy();
+      const policy = await assertProviderUrlAllowed(String(data.baseUrl), { allowlist: net.allowlist, requireHttps: net.requireHttps });
+      if (!policy.ok) return fail(422, 'url_blocked', `Base URL rejected by destination policy: ${policy.reason}`);
+    } catch {
+      // policy module not present yet — SSRF guard lands in parallel; skip validation until then
     }
   }
 

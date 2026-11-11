@@ -2,13 +2,17 @@ import { z } from 'zod';
 import { db } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { planExecution } from '@/lib/ai/router';
+import { getAdapterByType } from '@/lib/ai/providers';
 import { DEFAULT_CAPABILITIES } from '@/lib/types';
 
 export const runtime = 'nodejs';
 
 /** Lists routes (with accounts) + the live eligibility preview from the router. */
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
   const routes = await db.modelRoute.findMany({
     orderBy: [{ publicModelId: 'asc' }, { priority: 'asc' }, { createdAt: 'asc' }],
     include: { providerAccount: { select: { id: true, name: true, providerType: true, enabled: true, lastStatus: true } } },
@@ -39,6 +43,8 @@ const createSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
   let body: unknown;
   try {
     body = await req.json();
@@ -51,15 +57,25 @@ export async function POST(req: Request) {
   }
   const data = parsed.data;
 
+  // ANY registered ModelConfig can be routed — EmorAI family models AND
+  // provider-category models (adopted via Provider discovery). The old
+  // emorai-only restriction made adopted provider models permanently
+  // non-executable (the router had no path for them).
   const model = await db.modelConfig.findUnique({ where: { modelId: data.publicModelId } });
   if (!model) {
     return fail(404, 'unknown_model', `Public model "${data.publicModelId}" is not in the registry.`);
   }
-  if (model.category !== 'emorai') {
-    return fail(400, 'not_routable', `Model "${data.publicModelId}" is a provider-category model served directly; routes are for EmorAI family models.`);
-  }
   const account = await db.providerAccount.findUnique({ where: { id: data.providerAccountId } });
   if (!account) return fail(404, 'unknown_account', 'Provider account not found.');
+  // the account's provider type must have a registered adapter — otherwise
+  // the route could never execute
+  if (!getAdapterByType(account.providerType)) {
+    return fail(
+      400,
+      'unknown_provider',
+      `Provider type "${account.providerType}" has no registered adapter on this installation — the route would never be executable.`
+    );
+  }
 
   const duplicate = await db.modelRoute.findFirst({
     where: { publicModelId: data.publicModelId, providerAccountId: data.providerAccountId, upstreamModelId: data.upstreamModelId },
@@ -81,7 +97,8 @@ export async function POST(req: Request) {
       weight: data.weight,
     },
   });
-  // live eligibility preview for the admin (uses the same router logic)
+  // live eligibility preview for the admin (uses the same router logic);
+  // resolves disabled models too — route planning is an admin surface
   const preview = await planExecution(data.publicModelId);
   return ok({ route, preview }, { status: 201 });
 }

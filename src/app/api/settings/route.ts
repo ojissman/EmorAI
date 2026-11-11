@@ -1,15 +1,22 @@
 import { getSettings, updateSettings, settingsPatchSchema } from '@/lib/settings';
 import { listModels } from '@/lib/model-registry';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const settings = await getSettings();
   return ok({ settings });
 }
 
 export async function PUT(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();

@@ -1,11 +1,15 @@
 import { z } from 'zod';
 import { listModels, createModelConfig } from '@/lib/model-registry';
 import { ok, fail } from '@/lib/api/response';
+import { requireAdmin } from '@/lib/api/admin-auth';
 import { DEFAULT_CAPABILITIES, type ModelCapabilities } from '@/lib/types';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   const models = await listModels();
   return ok({ models });
 }
@@ -35,6 +39,9 @@ const createSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const denied = await requireAdmin(req);
+  if (denied) return denied;
+
   let body: unknown;
   try {
     body = await req.json();
