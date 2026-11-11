@@ -58,6 +58,15 @@ export type ModelInfo = {
   lastError: string | null;
 };
 
+// Routing strategy for the intelligent router. 'balanced' blends priority,
+// health and weight; 'priority' is pure configured order; 'cost' prefers the
+// lowest admin-configured route weight (the honest cost proxy — pricing
+// metadata is admin-configured only and never invented); 'performance'
+// prefers the lowest recently *measured* execution latency per route.
+export type RoutingStrategyName = 'balanced' | 'priority' | 'cost' | 'performance';
+
+export const ROUTING_STRATEGIES: RoutingStrategyName[] = ['balanced', 'priority', 'cost', 'performance'];
+
 export type AppSettings = {
   defaultModelId: string;
   systemInstructions: string;
@@ -68,6 +77,7 @@ export type AppSettings = {
   apiRateLimitPerMin: number;
   dashboardRateLimitPerMin: number;
   titleGeneration: boolean;
+  routingStrategy: RoutingStrategyName;
 };
 
 export type TokenUsage = {

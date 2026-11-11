@@ -25,8 +25,9 @@ import { db } from '@/lib/db';
 import { resolveModel } from '@/lib/model-registry';
 import { getAdapterByType, adapterContextForAccount } from '@/lib/ai/providers';
 import type { AIProviderAdapter, AdapterContext, StreamChatOptions, StreamEvent, CompleteChatResult } from '@/lib/ai/providers';
-import type { ModelCapabilities, ModelInfo } from '@/lib/types';
+import type { ModelCapabilities, ModelInfo, RoutingStrategyName } from '@/lib/types';
 import { DEFAULT_CAPABILITIES } from '@/lib/types';
+import { getSettings } from '@/lib/settings';
 import { ProviderError } from '@/lib/ai/zai-adapter';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -41,7 +42,16 @@ export type RouteAttribution = {
   routed?: boolean;
 };
 
-export type RoutingStrategy = 'balanced' | 'priority';
+export type RoutingStrategy = RoutingStrategyName;
+
+// Strategies:
+//   balanced    — priority + account priority + health recency + weight blend
+//   priority    — pure configured order (route.priority, then account priority)
+//   cost        — lowest admin-configured route weight first (weight is the
+//                 honest cost proxy; pricing metadata is never invented)
+//   performance — lowest recently *measured* execution latency first
+//                 (routes never measured use a neutral 1200 ms prior)
+const STRATEGY_SCORE_PRIOR_MS = 1200;
 
 type RouteRow = {
   id: string;
@@ -56,6 +66,7 @@ type RouteRow = {
   weight: number;
   healthStatus: string;
   lastServedAt: Date | null;
+  lastLatencyMs: number | null;
   lastError: string | null;
   providerAccount: {
     id: string;
@@ -119,17 +130,44 @@ function eligible(route: RouteRow, model: ModelInfo, req: ExecutionRequest): { o
   return { ok: true };
 }
 
+/** The strategy configured by the administrator (AppSetting, default balanced). */
+export async function currentRoutingStrategy(): Promise<RoutingStrategy> {
+  try {
+    const settings = await getSettings();
+    return settings.routingStrategy;
+  } catch {
+    return 'balanced'; // settings read must never break routing
+  }
+}
+
 /** Deterministic route score (lower = preferred). Strategy-aware. */
 function scoreRoute(route: RouteRow, strategy: RoutingStrategy): number {
-  let score = route.priority * 100 + route.providerAccount.priority * 10;
-  if (strategy === 'balanced') {
-    // healthy recent activity is a small bonus; stale/unknown is neutral
-    if (route.healthStatus === 'healthy') score -= 5;
-    if (route.providerAccount.lastStatus === 'ok') score -= 2;
-    // cost/performance weight: heavier routes rank later on ties
-    score += Math.max(0, route.weight - 1) * 8;
+  const base = route.priority * 100 + route.providerAccount.priority * 10;
+  switch (strategy) {
+    case 'priority':
+      // pure configured order — no health/weight adjustments
+      return base;
+    case 'cost':
+      // weight is the admin-configured cost proxy (default 1.0); lower first.
+      // Priority only breaks ties — cost dominates.
+      return Math.round(route.weight * 1000) + base;
+    case 'performance': {
+      // Measured recent execution latency only — never guessed. Unmeasured
+      // routes get a neutral prior so they are not permanently starved.
+      const latency = route.lastLatencyMs ?? STRATEGY_SCORE_PRIOR_MS;
+      return latency + base * 0.05 + (route.healthStatus === 'degraded' ? 2000 : 0);
+    }
+    case 'balanced':
+    default: {
+      let score = base;
+      // healthy recent activity is a small bonus; stale/unknown is neutral
+      if (route.healthStatus === 'healthy') score -= 5;
+      if (route.providerAccount.lastStatus === 'ok') score -= 2;
+      // cost/performance weight: heavier routes rank later on ties
+      score += Math.max(0, route.weight - 1) * 8;
+      return score;
+    }
   }
-  return score;
 }
 
 /** Loads + verifies + orders every candidate route for a public model. */
@@ -214,10 +252,18 @@ async function recordDecision(input: {
   }
 }
 
-async function markRouteServed(routeId: string, accountId: string): Promise<void> {
+async function markRouteServed(routeId: string, accountId: string, latencyMs?: number): Promise<void> {
   const now = new Date();
   void db.modelRoute
-    .update({ where: { id: routeId }, data: { healthStatus: 'healthy', lastServedAt: now, lastError: null } })
+    .update({
+      where: { id: routeId },
+      data: {
+        healthStatus: 'healthy',
+        lastServedAt: now,
+        lastError: null,
+        ...(typeof latencyMs === 'number' ? { lastLatencyMs: Math.max(0, Math.round(latencyMs)) } : {}),
+      },
+    })
     .catch(() => undefined);
   void db.providerAccount
     .update({ where: { id: accountId }, data: { requestCount: { increment: 1 }, lastStatus: 'ok', lastError: null } })
@@ -287,15 +333,16 @@ export async function planExecution(requestedModelId: string): Promise<RoutedStr
   const resolved = await resolveModel(requestedModelId);
   if (!resolved) return null;
   const model = resolved.model;
+  const strategy = await currentRoutingStrategy();
   const { candidates, rejected } = await planCandidates(
     model,
     { requestId: 'plan', needs: { vision: false, tools: false, streaming: true } },
-    'balanced'
+    strategy
   );
   return {
     model,
     viaAlias: resolved.viaAlias,
-    strategy: 'balanced',
+    strategy,
     routed: candidates.length > 0,
     candidates: candidates.map((c) => ({
       routeId: c.route.id,
@@ -324,8 +371,9 @@ export async function* streamChatRouted(
     throw new ProviderError('model_unavailable', `Model "${requestedModelId}" does not exist in this EmorAI installation.`, { status: 404 });
   }
   const model = resolved.model;
+  const strategy = await currentRoutingStrategy();
   const req: ExecutionRequest = { requestId: opts.requestId, needs: { ...needs, streaming: true } };
-  const { candidates, rejected } = await planCandidates(model, req, 'balanced');
+  const { candidates, rejected } = await planCandidates(model, req, strategy);
 
   if (candidates.length === 0) {
     // EmorAI family models REQUIRE a configured eligible route — never
@@ -354,7 +402,7 @@ export async function* streamChatRouted(
       void recordDecision({
         requestId: opts.requestId,
         modelId: model.modelId,
-        strategy: 'balanced',
+        strategy,
         candidates: [],
         rejected,
         attribution: {},
@@ -365,7 +413,7 @@ export async function* streamChatRouted(
       void recordDecision({
         requestId: opts.requestId,
         modelId: model.modelId,
-        strategy: 'balanced',
+        strategy,
         candidates: [],
         rejected,
         attribution: {},
@@ -393,6 +441,7 @@ export async function* streamChatRouted(
     attribution.attempts = i + 1;
     attribution.failedCandidates = attribution.failedCandidates ?? [];
     let producedOutput = false;
+    const attemptStart = Date.now();
     try {
       const routeOpts: StreamChatOptions = {
         ...opts,
@@ -404,12 +453,12 @@ export async function* streamChatRouted(
         yield ev;
       }
       producedOutput &&= true;
-      // success: mark healthy + served
-      void markRouteServed(c.route.id, c.route.providerAccountId);
+      // success: mark healthy + served (with this attempt's measured latency)
+      void markRouteServed(c.route.id, c.route.providerAccountId, Date.now() - attemptStart);
       void recordDecision({
         requestId: opts.requestId,
         modelId: model.modelId,
-        strategy: 'balanced',
+        strategy,
         candidates,
         rejected,
         attribution,
@@ -432,7 +481,7 @@ export async function* streamChatRouted(
   void recordDecision({
     requestId: opts.requestId,
     modelId: model.modelId,
-    strategy: 'balanced',
+    strategy,
     candidates,
     rejected,
     attribution,
@@ -458,8 +507,9 @@ export async function completeChatRouted(
     throw new ProviderError('model_unavailable', `Model "${requestedModelId}" does not exist in this EmorAI installation.`, { status: 404 });
   }
   const model = resolved.model;
+  const strategy = await currentRoutingStrategy();
   const req: ExecutionRequest = { requestId: opts.requestId, needs: { ...needs, streaming: false } };
-  const { candidates, rejected } = await planCandidates(model, req, 'balanced');
+  const { candidates, rejected } = await planCandidates(model, req, strategy);
 
   if (candidates.length === 0) {
     if (model.category === 'emorai') {
@@ -481,13 +531,13 @@ export async function completeChatRouted(
     try {
       const result = await directComplete(model, opts);
       void recordDecision({
-        requestId: opts.requestId, modelId: model.modelId, strategy: 'balanced',
+        requestId: opts.requestId, modelId: model.modelId, strategy,
         candidates: [], rejected, attribution: {}, finalStatus: 'direct', latencyMs: Date.now() - started,
       });
       return result;
     } catch (e) {
       void recordDecision({
-        requestId: opts.requestId, modelId: model.modelId, strategy: 'balanced',
+        requestId: opts.requestId, modelId: model.modelId, strategy,
         candidates: [], rejected, attribution: {}, finalStatus: 'failed',
         errorText: String((e as Error)?.message ?? e), latencyMs: Date.now() - started,
       });
@@ -506,15 +556,16 @@ export async function completeChatRouted(
     attribution.upstreamModel = c.route.upstreamModelId;
     attribution.attempts = i + 1;
     attribution.failedCandidates = attribution.failedCandidates ?? [];
+    const attemptStart = Date.now();
     try {
       const result = await c.adapter.completeChat(c.ctx, {
         ...opts,
         modelId: c.route.upstreamModelId,
         timeoutMs: opts.timeoutMs ?? c.route.timeoutMs,
       });
-      void markRouteServed(c.route.id, c.route.providerAccountId);
+      void markRouteServed(c.route.id, c.route.providerAccountId, Date.now() - attemptStart);
       void recordDecision({
-        requestId: opts.requestId, modelId: model.modelId, strategy: 'balanced',
+        requestId: opts.requestId, modelId: model.modelId, strategy,
         candidates, rejected, attribution, finalStatus: 'routed', latencyMs: Date.now() - started,
       });
       return result;
@@ -529,7 +580,7 @@ export async function completeChatRouted(
     }
   }
   void recordDecision({
-    requestId: opts.requestId, modelId: model.modelId, strategy: 'balanced',
+    requestId: opts.requestId, modelId: model.modelId, strategy,
     candidates, rejected, attribution, finalStatus: 'failed',
     errorText: lastError ? `${lastError.code}: ${lastError.message}` : 'all routes exhausted',
     latencyMs: Date.now() - started,

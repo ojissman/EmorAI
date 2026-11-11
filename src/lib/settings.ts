@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { db } from '@/lib/db';
-import type { AppSettings } from '@/lib/types';
+import type { AppSettings, RoutingStrategyName } from '@/lib/types';
+import { ROUTING_STRATEGIES } from '@/lib/types';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultModelId: 'glm-5.3-flash',
@@ -12,6 +13,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   apiRateLimitPerMin: 60,
   dashboardRateLimitPerMin: 30,
   titleGeneration: true,
+  routingStrategy: 'balanced',
 };
 
 export const settingsSchema = z.object({
@@ -24,6 +26,7 @@ export const settingsSchema = z.object({
   apiRateLimitPerMin: z.number().int().min(1).max(10000),
   dashboardRateLimitPerMin: z.number().int().min(1).max(1000),
   titleGeneration: z.boolean(),
+  routingStrategy: z.enum(ROUTING_STRATEGIES as [RoutingStrategyName, ...RoutingStrategyName[]]),
 });
 
 export const settingsPatchSchema = settingsSchema.partial();

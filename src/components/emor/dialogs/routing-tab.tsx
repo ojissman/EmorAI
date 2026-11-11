@@ -27,11 +27,20 @@ import {
   useModels,
   useProviders,
   useRoutes,
+  useSettings,
+  useSettingsMutation,
   useUpdateRoute,
 } from '@/hooks/use-emor-queries';
 import type { ModelRouteRow } from '@/hooks/use-emor-queries';
-import type { ModelInfo } from '@/lib/types';
+import type { ModelInfo, RoutingStrategyName } from '@/lib/types';
 import { providerTypeLabel, timeAgo } from './provider-shared';
+
+const STRATEGY_HINT: Record<RoutingStrategyName, string> = {
+  balanced: 'Priority + health recency + weight, blended. The default.',
+  priority: 'Pure configured priority order — no health or weight adjustments.',
+  cost: 'Lowest route weight first — weight is the admin-configured cost proxy.',
+  performance: 'Lowest recently measured execution latency first (per-route, real executions only).',
+};
 
 function HealthBadge({ status }: { status: string }) {
   if (status === 'healthy') {
@@ -163,6 +172,7 @@ function RouteRow({ route }: { route: ModelRouteRow }) {
         <span>Served: {route.lastServedAt ? timeAgo(route.lastServedAt) : 'never'}</span>
         <span>Timeout: {(route.timeoutMs / 1000).toFixed(0)}s</span>
         <span>Weight: {route.weight}</span>
+        {route.lastLatencyMs != null && <span>Latency: {route.lastLatencyMs}ms</span>}
         {route.lastError ? (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -245,6 +255,8 @@ export function RoutesTab() {
   const modelsQuery = useModels();
   const providersQuery = useProviders();
   const create = useCreateRoute();
+  const settingsQuery = useSettings();
+  const settingsMutation = useSettingsMutation();
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({
     publicModelId: '',
@@ -258,6 +270,16 @@ export function RoutesTab() {
   const models = modelsQuery.data?.models ?? [];
   const emoraiModels = models.filter((m) => m.category === 'emorai');
   const enabledAccounts = (providersQuery.data?.accounts ?? []).filter((a) => a.enabled);
+  const strategy: RoutingStrategyName = settingsQuery.data?.settings.routingStrategy ?? 'balanced';
+
+  const setStrategy = async (v: RoutingStrategyName) => {
+    try {
+      await settingsMutation.mutateAsync({ routingStrategy: v });
+      toast.success(`Routing strategy set to "${v}" — applies to the next request.`);
+    } catch (e) {
+      toast.error(String((e as Error).message));
+    }
+  };
 
   // Registry-sized lists (tens of rows) — plain computation is cheaper than memoization
   const modelById = new Map(models.map((m) => [m.modelId, m] as const));
@@ -329,6 +351,25 @@ export function RoutesTab() {
         <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setAdding((v) => !v)}>
           <Plus className="size-3.5" /> Add route
         </Button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-muted/30 p-3">
+        <Label htmlFor="routing-strategy" className="text-xs font-medium">
+          Routing strategy
+        </Label>
+        <Select value={strategy} onValueChange={(v) => void setStrategy(v as RoutingStrategyName)}>
+          <SelectTrigger id="routing-strategy" className="h-8 w-44 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="balanced">Balanced</SelectItem>
+            <SelectItem value="priority">Priority</SelectItem>
+            <SelectItem value="cost">Cost (weight)</SelectItem>
+            <SelectItem value="performance">Performance (measured)</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="min-w-0 flex-1 basis-48 text-[10px] leading-snug text-muted-foreground">{STRATEGY_HINT[strategy]}</p>
+        {settingsMutation.isPending && <Loader2 className="size-3 animate-spin text-muted-foreground" aria-label="Saving strategy" />}
       </div>
 
       {adding && (

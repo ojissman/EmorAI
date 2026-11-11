@@ -165,6 +165,7 @@ export type ModelRouteRow = {
   weight: number;
   healthStatus: string;
   lastServedAt: string | null;
+  lastLatencyMs: number | null;
   lastError: string | null;
   providerAccount: {
     id: string;
