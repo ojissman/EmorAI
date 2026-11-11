@@ -426,19 +426,31 @@ export async function* streamChatRouted(
     return;
   }
 
-  // routed path: try candidates in order; fail over only before first output
+  // routed path: try candidates in order; fail over only before first output.
+  // A sustained rate limit is account-wide upstream — retrying OTHER routes on
+  // the SAME account just restarts the full backoff storm against the same
+  // limit, so once an account comes back rate_limited its remaining routes are
+  // skipped and only genuinely different accounts are tried.
   attribution.routed = true;
   let emittedOutput = false;
   let lastError: ProviderError | null = null;
+  const rateLimitedAccounts = new Set<string>();
   const started = Date.now();
 
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
+    if (rateLimitedAccounts.has(c.route.providerAccountId)) {
+      attribution.failedCandidates!.push({
+        routeId: c.route.id,
+        reason: 'rate_limited: skipped — same account already came back rate-limited',
+      });
+      continue;
+    }
     attribution.routeId = c.route.id;
     attribution.providerAccountId = c.route.providerAccountId;
     attribution.providerType = c.route.providerAccount.providerType;
     attribution.upstreamModel = c.route.upstreamModelId;
-    attribution.attempts = i + 1;
+    attribution.attempts = (attribution.attempts ?? 0) + 1;
     attribution.failedCandidates = attribution.failedCandidates ?? [];
     let producedOutput = false;
     const attemptStart = Date.now();
@@ -472,6 +484,7 @@ export async function* streamChatRouted(
       emittedOutput = emittedOutput || producedOutput;
       const canFailover = !producedOutput && !emittedOutput && failoverWorthy(err) && i < candidates.length - 1;
       attribution.failedCandidates!.push({ routeId: c.route.id, reason: `${err.code}: ${err.message.slice(0, 160)}` });
+      if (err.code === 'rate_limited') rateLimitedAccounts.add(c.route.providerAccountId);
       void markRouteFailed(c.route.id, c.route.providerAccountId, err.message, err.code === 'provider_auth');
       if (!canFailover) break;
       // fail over to the next eligible route; public model identity preserved
@@ -547,14 +560,22 @@ export async function completeChatRouted(
 
   attribution.routed = true;
   let lastError: ProviderError | null = null;
+  const rateLimitedAccounts = new Set<string>();
   const started = Date.now();
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
+    if (rateLimitedAccounts.has(c.route.providerAccountId)) {
+      attribution.failedCandidates!.push({
+        routeId: c.route.id,
+        reason: 'rate_limited: skipped — same account already came back rate-limited',
+      });
+      continue;
+    }
     attribution.routeId = c.route.id;
     attribution.providerAccountId = c.route.providerAccountId;
     attribution.providerType = c.route.providerAccount.providerType;
     attribution.upstreamModel = c.route.upstreamModelId;
-    attribution.attempts = i + 1;
+    attribution.attempts = (attribution.attempts ?? 0) + 1;
     attribution.failedCandidates = attribution.failedCandidates ?? [];
     const attemptStart = Date.now();
     try {
@@ -573,6 +594,7 @@ export async function completeChatRouted(
       const err = e instanceof ProviderError ? e : new ProviderError('provider_error', String((e as Error)?.message ?? e), { status: 502, retryable: true });
       lastError = err;
       attribution.failedCandidates!.push({ routeId: c.route.id, reason: `${err.code}: ${err.message.slice(0, 160)}` });
+      if (err.code === 'rate_limited') rateLimitedAccounts.add(c.route.providerAccountId);
       void markRouteFailed(c.route.id, c.route.providerAccountId, err.message, err.code === 'provider_auth');
       // non-streaming: a thrown request produced no user-visible output →
       // failover is always safe when the error is retryable

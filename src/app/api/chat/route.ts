@@ -296,18 +296,23 @@ export async function POST(req: Request) {
 
         const saved = await persistAssistant('complete');
 
-        // Auto-title on the first exchange.
+        if (finalUsage) send({ type: 'usage', usage: finalUsage });
+        // done FIRST — the composer unlocks and the message finalizes while
+        // the stream stays open for the cosmetic extras below.
+        send({ type: 'done', message: serializeMessage(saved) });
+
+        // Auto-title on the first exchange. Runs AFTER done (and never blocks
+        // it): the title request joins the upstream start-gate at background
+        // priority — when the provider is busy it balks and the local
+        // fallback title is used instead of stacking latency or 429 pressure.
         if (settings.titleGeneration && conversation.title === 'New chat') {
           const count = await db.message.count({ where: { conversationId: conversation.id } });
           if (count <= 3) {
             const title = await generateTitle(lastUser?.content ?? input.message ?? '', fullContent);
             await db.conversation.update({ where: { id: conversation.id }, data: { title } });
-            send({ type: 'title', title });
+            send({ type: 'title', title, conversationId: conversation.id });
           }
         }
-
-        if (finalUsage) send({ type: 'usage', usage: finalUsage });
-        send({ type: 'done', message: serializeMessage(saved) });
       } catch (e) {
         const aborted = abortController.signal.aborted || (e as Error)?.name === 'AbortError';
         if (aborted) {

@@ -107,7 +107,10 @@ export function useChatStream() {
                 continue;
               }
               const s = store.getState().streaming;
-              if (!s) break;
+              // After 'done' the streaming state is cleared, but the stream
+              // stays open briefly for post-done events (title). Keep reading
+              // those; anything else after the stream ended is stale.
+              if (!s && evt.type !== 'title' && evt.type !== 'usage') break;
               switch (evt.type) {
                 case 'start':
                   store.getState().updateStreaming({
@@ -136,20 +139,27 @@ export function useChatStream() {
                 case 'sources':
                   store.getState().updateStreaming({ sources: evt.sources });
                   break;
-                case 'title':
-                  qc.setQueryData<{ conversations: SerializedConversation[] }>(
-                    ['conversations', ''],
-                    (old) =>
-                      old && s
-                        ? {
-                            conversations: old.conversations.map((c) =>
-                              c.id === s.conversationId ? { ...c, title: evt.title } : c
-                            ),
-                          }
-                        : old
+                case 'title': {
+                  // May arrive after 'done' (title generation is decoupled
+                  // from the reply) — target the event's own conversationId,
+                  // falling back to the live streaming state.
+                  const convId = evt.conversationId ?? s?.conversationId;
+                  if (convId) {
+                    qc.setQueryData<{ conversations: SerializedConversation[] }>(
+                      ['conversations', ''],
+                      (old) =>
+                        old
+                          ? {
+                              conversations: old.conversations.map((c) =>
+                                c.id === convId ? { ...c, title: evt.title } : c
+                              ),
+                            }
+                          : old
                     );
+                  }
                   void qc.invalidateQueries({ queryKey: ['conversations'] });
                   break;
+                }
                 case 'usage':
                   // Recorded server-side; usage dashboard picks it up on next visit.
                   break;

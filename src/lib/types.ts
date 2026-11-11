@@ -112,7 +112,7 @@ export type ChatStreamEvent =
   | { type: 'delta'; content: string }
   | { type: 'reasoning'; content: string }
   | { type: 'sources'; sources: WebSource[] }
-  | { type: 'title'; title: string }
+  | { type: 'title'; title: string; conversationId?: string }
   | { type: 'usage'; usage: TokenUsage }
   | { type: 'done'; message: SerializedMessage }
   | { type: 'error'; code: string; message: string };

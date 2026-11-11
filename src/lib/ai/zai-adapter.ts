@@ -2,6 +2,7 @@ import ZAI from 'z-ai-web-dev-sdk';
 import { parseUpstreamSSE, sseDone, sseEvent } from '@/lib/ai/sse';
 import { sanitizeToolsForProvider, translateToolChoiceName, type SanitizedTools } from '@/lib/ai/provider-tool-limits';
 import { finalizeProviderMessages } from '@/lib/api/protocol/roles';
+import { acquireUpstreamSlot, type UpstreamPriority } from '@/lib/ai/upstream-throttle';
 import type { ProviderMessage, ProviderTool, ProviderToolCall, TokenUsage, WebSource } from '@/lib/types';
 
 // ─── Provider errors ─────────────────────────────────────────────────────────
@@ -81,6 +82,9 @@ export type StreamChatOptions = {
   signal?: AbortSignal;
   // hard timeout in ms (default 120s); combined with any external signal
   timeoutMs?: number;
+  // upstream start-gate priority: 'interactive' (default — always queues) or
+  // 'background' (balks instead of waiting; callers must tolerate failure)
+  priority?: UpstreamPriority;
 };
 
 export type ToolCallDelta = {
@@ -209,8 +213,13 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   let upstream: ReadableStream<Uint8Array> | undefined;
   const hasVisionParts = opts.messages.some((m) => Array.isArray(m.content));
 
-  // Connect with backoff for rate limits; never retry mid-stream.
+  // Connect with backoff for rate limits; never retry mid-stream. Every
+  // attempt (first or retry) acquires a process-wide start slot first, so
+  // concurrent EmorAI callers never collide on the upstream request-rate
+  // limit — the backoff below then covers externally caused 429s.
   for (;;) {
+    await acquireUpstreamSlot(opts.priority);
+    throwIfAborted(opts.signal);
     try {
       const body = buildBody(safeOpts, true, toolSafe);
       const res = hasVisionParts
@@ -309,6 +318,9 @@ export async function completeChat(opts: StreamChatOptions): Promise<CompleteCha
   const { signal, cancel } = withTimeout(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   try {
     for (;;) {
+      // start gate + backoff (same coordinated spacing as streaming)
+      await acquireUpstreamSlot(opts.priority);
+      throwIfAborted(signal);
       try {
         const res = (await zai.chat.completions.create(buildBody(safeOpts, false, toolSafe) as never)) as {
           model?: string;
@@ -372,6 +384,7 @@ export async function completeVision(opts: {
   modelId?: string;
   temperature?: number;
   maxTokens?: number;
+  priority?: UpstreamPriority;
 }): Promise<CompleteChatResult> {
   throwIfAborted();
   const zai = await ZAI.create();
@@ -383,6 +396,7 @@ export async function completeVision(opts: {
   if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
   if (typeof opts.maxTokens === 'number') body.max_tokens = opts.maxTokens;
   try {
+    await acquireUpstreamSlot(opts.priority);
     const res = (await zai.chat.completions.createVision(body as never)) as {
       model?: string;
       choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
@@ -444,6 +458,10 @@ export async function generateTitle(firstUserMessage: string, assistantReply: st
       ],
       temperature: 0.3,
       maxTokens: 32,
+      // background priority: when the upstream is busy the gate balks and we
+      // fall straight through to the local fallback title — never stack
+      // latency onto the user's stream for a cosmetic extra.
+      priority: 'background',
     });
     const title = res.content.replace(/["'`\n]/g, '').trim();
     if (title.length >= 3 && title.length <= 64) return title;
