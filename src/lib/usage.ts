@@ -19,6 +19,9 @@ export type RecordUsageInput = {
   latencyMs?: number | null;
   success?: boolean;
   errorText?: string | null;
+  // routing attribution (present when the request went through the router)
+  routeId?: string | null;
+  providerAccountId?: string | null;
 };
 
 /**
@@ -45,6 +48,8 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
         latencyMs: input.latencyMs ?? null,
         success: input.success ?? true,
         errorText: input.errorText ? input.errorText.slice(0, 500) : null,
+        routeId: input.routeId ?? null,
+        providerAccountId: input.providerAccountId ?? null,
       },
     });
     if (input.apiKeyId) {

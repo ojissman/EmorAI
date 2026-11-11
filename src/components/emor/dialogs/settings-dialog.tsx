@@ -55,8 +55,10 @@ import {
 import { api } from '@/lib/api-client';
 import { useModels, useSettings, useSettingsMutation } from '@/hooks/use-emor-queries';
 import { useEmorStore } from '@/stores/emor-store';
-import type { AppSettings, ModelCapabilities, ModelInfo } from '@/lib/types';
+import type { AppSettings, ModelCapabilities, ModelInfo, ModelLifecycle } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { ProvidersTab } from './providers-tab';
+import { RoutesTab } from './routing-tab';
 
 function GeneralForm({
   settings,
@@ -252,6 +254,24 @@ function AppearanceTab() {
   );
 }
 
+/** Subtle lifecycle tag for non-active models (draft/preview/deprecated/retired). */
+function LifecycleBadge({ lifecycle }: { lifecycle: ModelLifecycle }) {
+  if (lifecycle === 'active') return null;
+  const cls =
+    lifecycle === 'preview'
+      ? 'border-violet-500/20 bg-violet-500/10 text-violet-600 dark:text-violet-400'
+      : lifecycle === 'deprecated'
+        ? 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+        : lifecycle === 'retired'
+          ? 'border-destructive/30 text-destructive'
+          : 'text-muted-foreground';
+  return (
+    <Badge variant="outline" className={cn('text-[10px]', cls)}>
+      {lifecycle}
+    </Badge>
+  );
+}
+
 function ModelRow({ model }: { model: ModelInfo }) {
   const qc = useQueryClient();
   const [probing, setProbing] = useState(false);
@@ -332,6 +352,12 @@ function ModelRow({ model }: { model: ModelInfo }) {
         ) : (
           <Badge variant="outline" className="text-[10px]">Requires plan</Badge>
         )}
+        {model.category === 'emorai' && (
+          <Badge variant="secondary" className="gap-1 bg-primary/10 text-[10px] text-primary">
+            <span className="size-1.5 rounded-full bg-primary" /> EmorAI
+          </Badge>
+        )}
+        {model.lifecycle !== 'active' && <LifecycleBadge lifecycle={model.lifecycle} />}
         <div className="ml-auto flex items-center gap-2">
           <Switch checked={model.enabled} onCheckedChange={(v) => void toggleEnabled(v)} aria-label={`Enable ${model.displayName}`} />
         </div>
@@ -432,6 +458,8 @@ function ModelsTab() {
   const [discovering, setDiscovering] = useState(false);
   const [form, setForm] = useState({ modelId: '', displayName: '', description: '', freeTier: false, aliases: '', contextWindow: '', maxOutputTokens: '' });
   const models = data?.models ?? [];
+  const emoraiModels = models.filter((m) => m.category === 'emorai');
+  const providerModels = models.filter((m) => m.category !== 'emorai');
 
   const discover = async () => {
     setDiscovering(true);
@@ -543,10 +571,29 @@ function ModelsTab() {
         </div>
       )}
 
-      <div className="space-y-2.5">
-        {models.map((m) => (
-          <ModelRow key={m.id} model={m} />
-        ))}
+      <div className="space-y-5">
+        <section className="space-y-2.5" aria-label="EmorAI models">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">EmorAI models</p>
+          {emoraiModels.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No EmorAI family models in the registry yet — these are the models that route through provider accounts.
+            </p>
+          )}
+          {emoraiModels.map((m) => (
+            <ModelRow key={m.id} model={m} />
+          ))}
+        </section>
+        <section className="space-y-2.5" aria-label="Provider models">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Provider models</p>
+          {providerModels.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No provider-catalogue models yet — add one above or adopt discovered models from a provider account.
+            </p>
+          )}
+          {providerModels.map((m) => (
+            <ModelRow key={m.id} model={m} />
+          ))}
+        </section>
       </div>
     </div>
   );
@@ -736,17 +783,21 @@ export function SettingsDialog() {
           <DialogDescription>Configure your EmorAI installation.</DialogDescription>
         </DialogHeader>
         <Tabs defaultValue={tab} value={tab} onValueChange={(v) => useEmorStore.getState().openDialog('settings', v)} className="flex min-h-0 flex-col">
-          <TabsList className="mx-5 mt-4 grid w-auto grid-cols-5">
+          <TabsList className="mx-5 mt-4 grid w-auto grid-cols-4 sm:grid-cols-7">
             <TabsTrigger value="general" className="text-xs">General</TabsTrigger>
             <TabsTrigger value="appearance" className="gap-1 text-xs"><Eye className="size-3" />Look</TabsTrigger>
             <TabsTrigger value="models" className="text-xs">Models</TabsTrigger>
-            <TabsTrigger value="provider" className="gap-1 text-xs"><Server className="size-3" />Provider</TabsTrigger>
+            <TabsTrigger value="providers" className="text-xs">Providers</TabsTrigger>
+            <TabsTrigger value="routes" className="text-xs">Routing</TabsTrigger>
+            <TabsTrigger value="provider" className="gap-1 text-xs"><Server className="size-3" />Security</TabsTrigger>
             <TabsTrigger value="data" className="gap-1 text-xs"><Database className="size-3" />Data</TabsTrigger>
           </TabsList>
           <div className="emor-scroll min-h-0 flex-1 overflow-y-auto px-5 py-5" style={{ maxHeight: '60vh' }}>
             <TabsContent value="general" className="mt-0"><GeneralTab /></TabsContent>
             <TabsContent value="appearance" className="mt-0"><AppearanceTab /></TabsContent>
             <TabsContent value="models" className="mt-0"><ModelsTab /></TabsContent>
+            <TabsContent value="providers" className="mt-0"><ProvidersTab /></TabsContent>
+            <TabsContent value="routes" className="mt-0"><RoutesTab /></TabsContent>
             <TabsContent value="provider" className="mt-0"><ProviderTab /></TabsContent>
             <TabsContent value="data" className="mt-0"><DataTab /></TabsContent>
           </div>

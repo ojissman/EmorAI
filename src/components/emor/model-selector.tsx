@@ -67,6 +67,11 @@ export function ModelSelector({ selected, onSelect, compact }: { selected: Model
                   Plan
                 </Badge>
               )}
+              {m.category === 'emorai' && (
+                <Badge variant="secondary" className="h-4 gap-1 bg-primary/10 px-1.5 text-[10px] font-normal text-primary">
+                  <span className="size-1.5 rounded-full bg-primary" /> EmorAI
+                </Badge>
+              )}
               {m.lastStatus === 'error' && (
                 <Badge variant="outline" className="h-4 gap-1 border-destructive/40 px-1.5 text-[10px] font-normal text-destructive">
                   <CircleAlert className="size-2.5" /> Issue

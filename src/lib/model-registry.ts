@@ -1,5 +1,6 @@
 import { db } from '@/lib/db';
-import type { ModelCapabilities, ModelInfo } from '@/lib/types';
+import { Prisma } from '@prisma/client';
+import type { ModelCapabilities, ModelInfo, ModelLifecycle, ModelPricing } from '@/lib/types';
 import { DEFAULT_CAPABILITIES } from '@/lib/types';
 
 // ─── Default model catalog ───────────────────────────────────────────────────
@@ -84,6 +85,10 @@ function toModelInfo(row: {
   displayName: string;
   description: string;
   provider: string;
+  category: string | null;
+  lifecycle: string | null;
+  generation: string | null;
+  pricing: unknown;
   capabilities: unknown;
   freeTier: boolean;
   enabled: boolean;
@@ -99,12 +104,24 @@ function toModelInfo(row: {
 }): ModelInfo {
   const caps = (row.capabilities ?? {}) as Partial<ModelCapabilities>;
   const aliases = Array.isArray(row.aliases) ? (row.aliases as unknown[]).filter((a): a is string => typeof a === 'string') : [];
+  const pricing = (row.pricing ?? null) as ModelPricing | null;
   return {
     id: row.id,
     modelId: row.modelId,
     displayName: row.displayName,
     description: row.description,
     provider: row.provider,
+    category: row.category === 'emorai' ? 'emorai' : 'provider',
+    lifecycle: (['draft', 'preview', 'active', 'deprecated', 'retired'] as const).includes(
+      (row.lifecycle ?? 'active') as ModelLifecycle
+    )
+      ? ((row.lifecycle ?? 'active') as ModelLifecycle)
+      : 'active',
+    generation: typeof row.generation === 'string' ? row.generation : null,
+    pricing:
+      pricing && typeof pricing.inputPerMTok === 'number' && typeof pricing.outputPerMTok === 'number'
+        ? { inputPerMTok: pricing.inputPerMTok, outputPerMTok: pricing.outputPerMTok, currency: pricing.currency ?? 'USD' }
+        : null,
     capabilities: { ...DEFAULT_CAPABILITIES, ...caps },
     freeTier: row.freeTier,
     enabled: row.enabled,
@@ -222,14 +239,28 @@ export async function updateModelConfig(
     maxOutputTokens: number | null;
     aliases: string[];
     streamSupported: boolean;
+    lifecycle: string;
+    pricing: { inputPerMTok: number; outputPerMTok: number; currency: string } | null;
   }>
 ): Promise<ModelInfo | null> {
-  const row = await db.modelConfig.update({ where: { id: dbId }, data: patch });
+  const { pricing, ...rest } = patch;
+  const row = await db.modelConfig.update({
+    where: { id: dbId },
+    data: { ...rest, ...(pricing !== undefined ? { pricing: pricing ?? Prisma.DbNull } : {}) },
+  });
   return toModelInfo(row);
 }
 
 export async function createModelConfig(
-  seed: ModelSeed & { provider?: string; aliases?: string[] }
+  seed: ModelSeed & {
+    provider?: string;
+    aliases?: string[];
+    category?: 'emorai' | 'provider';
+    lifecycle?: string;
+    generation?: string | null;
+    pricing?: { inputPerMTok: number; outputPerMTok: number; currency: string } | null;
+    enabled?: boolean;
+  }
 ): Promise<ModelInfo> {
   const row = await db.modelConfig.create({
     data: {
@@ -240,6 +271,11 @@ export async function createModelConfig(
       freeTier: seed.freeTier,
       sortOrder: seed.sortOrder,
       provider: seed.provider ?? 'zai',
+      category: seed.category ?? 'provider',
+      lifecycle: seed.lifecycle ?? 'active',
+      generation: seed.generation ?? null,
+      pricing: seed.pricing ?? Prisma.DbNull,
+      enabled: seed.enabled ?? true,
       contextWindow: seed.contextWindow ?? null,
       maxOutputTokens: seed.maxOutputTokens ?? null,
       aliases: seed.aliases && seed.aliases.length > 0 ? seed.aliases : undefined,

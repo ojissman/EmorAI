@@ -3,7 +3,8 @@ import { authenticateV1 } from '@/lib/api/auth';
 import { resolveModel, listEnabledModels } from '@/lib/model-registry';
 import { getSettings } from '@/lib/settings';
 import { recordUsage, estimateUsage, requestBodyPreview, modelGuessFromRaw } from '@/lib/usage';
-import { ProviderError, streamChat, completeChat } from '@/lib/ai/zai-adapter';
+import { ProviderError } from '@/lib/ai/zai-adapter';
+import { streamChatRouted, completeChatRouted, type RouteAttribution } from '@/lib/ai/router';
 import { SSE_HEADERS } from '@/lib/ai/sse';
 import { corsPreflight } from '@/lib/api/cors';
 import { randomId } from '@/lib/api/protocol/openai';
@@ -134,7 +135,7 @@ export async function POST(req: Request) {
     logClientError(404, 'model_disabled', message, model.modelId);
     return anthropicError(404, 'not_found_error', message, authHeaders);
   }
-  if (model.provider !== 'zai') {
+  if (model.provider !== 'zai' && model.category !== 'emorai') {
     return anthropicError(
       501,
       'api_error',
@@ -181,8 +182,6 @@ export async function POST(req: Request) {
 
   const providerOpts = {
     messages: translated.messages,
-    modelId: model.modelId,
-    provider: model.provider,
     temperature: translated.temperature,
     maxTokens: translated.maxTokens,
     topP: translated.topP,
@@ -192,6 +191,8 @@ export async function POST(req: Request) {
     toolChoice: translated.toolChoice,
     thinkingEnabled: translated.thinkingEnabled,
   };
+  // routing attribution — filled by the router before the first event
+  const attribution: RouteAttribution = {};
 
   // ── Streaming (Anthropic SSE event protocol) ───────────────────────────────
   if (body.stream) {
@@ -226,7 +227,11 @@ export async function POST(req: Request) {
 
         write(translator.start());
         try {
-          for await (const ev of streamChat({ ...providerOpts, signal: abortController.signal })) {
+          for await (const ev of streamChatRouted(
+            body.model,
+            { ...providerOpts, signal: abortController.signal, requestId, attribution },
+            { vision: hasImages, tools: !!(body.tools && body.tools.length > 0) }
+          )) {
             if (ev.type === 'delta') full += ev.content;
             if (ev.type === 'tool-call-delta') sawToolCall = true;
             if (ev.type === 'served-model') servedModel = ev.model;
@@ -253,6 +258,8 @@ export async function POST(req: Request) {
             usage: usage ?? estimateUsage(translated.messages, full),
             latencyMs: Date.now() - startedAt,
             success: true,
+            routeId: attribution.routeId ?? null,
+            providerAccountId: attribution.providerAccountId ?? null,
           });
         } catch (e) {
           const err = e instanceof ProviderError ? e : new ProviderError('provider_error', String((e as Error)?.message ?? e));
@@ -274,6 +281,8 @@ export async function POST(req: Request) {
             success: false,
             errorText: err.message,
             latencyMs: Date.now() - startedAt,
+            routeId: attribution.routeId ?? null,
+            providerAccountId: attribution.providerAccountId ?? null,
           });
         } finally {
           clearTimeout(timeout);
@@ -303,7 +312,11 @@ export async function POST(req: Request) {
 
   // ── Non-streaming (Anthropic message response) ─────────────────────────────
   try {
-    const res = await completeChat(providerOpts);
+    const res = await completeChatRouted(
+      body.model,
+      { ...providerOpts, requestId, attribution },
+      { vision: hasImages, tools: !!(body.tools && body.tools.length > 0) }
+    );
     if ((!res.content || res.content.trim().length === 0) && res.toolCalls.length === 0) {
       throw new ProviderError('provider_error', 'The provider returned an empty response.');
     }
@@ -320,6 +333,8 @@ export async function POST(req: Request) {
       usage,
       latencyMs: Date.now() - startedAt,
       success: true,
+      routeId: attribution.routeId ?? null,
+      providerAccountId: attribution.providerAccountId ?? null,
     });
     const message = buildAnthropicMessage({
       id: messageId,
@@ -353,6 +368,8 @@ export async function POST(req: Request) {
       success: false,
       errorText: err.message,
       latencyMs: Date.now() - startedAt,
+      routeId: attribution.routeId ?? null,
+      providerAccountId: attribution.providerAccountId ?? null,
     });
     const headers = { ...authHeaders };
     if (err.code === 'rate_limited') headers['retry-after'] = '15';

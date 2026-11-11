@@ -90,7 +90,23 @@ bun run dev          # http://localhost:3000
 | --- | --- | --- |
 | `DATABASE_URL` | `.env` | `file:/home/z/my-project/db/custom.db` in this sandbox. For production PostgreSQL: set `provider = "postgresql"` in `prisma/schema.prisma` and a `postgresql://…` URL. |
 | Z.ai credentials | `/etc/.z-ai-config` (or project/home dir) | `{"baseUrl": "...", "apiKey": "..."}`. Resolved server-side by the SDK. Never expose publicly. |
+| `EMORAI_MASTER_KEY` | `.env` | ≥16 chars; master key for provider-credential encryption at rest (AES-256-GCM). Generate: `openssl rand -base64 32`. While unset, adding stored-credential provider accounts (OpenAI-compatible / Anthropic / self-hosted) is refused — by design; the platform zai account keeps working. |
 | Uploads | `db/uploads/` | Stored on disk; metadata in the `FileMetadata` table. 10 MB per file limit. |
+
+### Multi-provider platform (intelligent routing)
+EmorAI now runs as a provider-independent platform with its own unified model
+family (`emor-5.3`, `emor-5.2`, `emor-5.1`) served through an intelligent
+router over authorized upstream routes:
+
+- **Settings → Providers**: add/validate/rotate upstream accounts (encrypted
+  credentials; Z.ai runs on platform-managed credentials).
+- **Settings → Routing**: configure per-model routes (primary + fallback),
+  priorities, capability subsets, health state.
+- Every routed request is attributed in `UsageRecord` (route + account) and
+  logged in `RoutingDecision` (candidates, rejections, selection).
+- Seed the family after a fresh clone: `bun run scripts/seed-emor-family.ts`.
+- Verify with real executions: `bun run scripts/test-routing.ts`.
+- Docs: `docs/IMPLEMENTATION-STATUS.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY.md`.
 
 ### Private data bundle (encrypted)
 This public repo keeps personal data out of git and ships it as one encrypted archive instead:

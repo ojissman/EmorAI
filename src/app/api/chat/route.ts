@@ -6,7 +6,8 @@ import { rateLimit } from '@/lib/rate-limit';
 import { recordUsage, estimateUsage } from '@/lib/usage';
 import { fail } from '@/lib/api/response';
 import { SSE_HEADERS, sseEvent } from '@/lib/ai/sse';
-import { ProviderError, generateTitle, streamChat, webSearch } from '@/lib/ai/zai-adapter';
+import { ProviderError, generateTitle, webSearch } from '@/lib/ai/zai-adapter';
+import { streamChatRouted, type RouteAttribution } from '@/lib/ai/router';
 import { buildProviderMessages } from '@/lib/ai/prompt';
 import { serializeMessage } from '@/lib/serialize';
 import type { ChatStreamEvent, TokenUsage, WebSource } from '@/lib/types';
@@ -202,6 +203,8 @@ export async function POST(req: Request) {
   let servedModel: string | null = null;
   let fullContent = '';
   let fullReasoning = '';
+  // routing attribution — filled by the router before the first event
+  const attribution: RouteAttribution = {};
 
   async function persistAssistant(status: 'complete' | 'stopped' | 'error', errorText?: string) {
     const data = await db.message.update({
@@ -229,6 +232,8 @@ export async function POST(req: Request) {
       latencyMs: Date.now() - startedAt,
       success: status === 'complete',
       errorText,
+      routeId: attribution.routeId ?? null,
+      providerAccountId: attribution.providerAccountId ?? null,
     });
     return data;
   }
@@ -259,14 +264,18 @@ export async function POST(req: Request) {
 
       try {
         emitStart();
-        for await (const ev of streamChat({
-          messages: providerMessages,
-          modelId: model.modelId,
-          provider: model.provider,
-          temperature: settings.temperature,
-          maxTokens: settings.maxTokens,
-          signal: abortController.signal,
-        })) {
+        for await (const ev of streamChatRouted(
+          input.modelId,
+          {
+            messages: providerMessages,
+            temperature: settings.temperature,
+            maxTokens: settings.maxTokens,
+            signal: abortController.signal,
+            requestId: `dash-${Date.now().toString(36)}`,
+            attribution,
+          },
+          { vision: false, tools: false }
+        )) {
           if (ev.type === 'delta') {
             fullContent += ev.content;
             send({ type: 'delta', content: ev.content });

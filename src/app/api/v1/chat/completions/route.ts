@@ -4,7 +4,8 @@ import { authenticateV1, scopeFailure, modelAllowFailure } from '@/lib/api/auth'
 import { resolveModel, listEnabledModels } from '@/lib/model-registry';
 import { getSettings } from '@/lib/settings';
 import { recordUsage, estimateUsage, requestBodyPreview, modelGuessFromRaw } from '@/lib/usage';
-import { ProviderError, streamChat, completeChat } from '@/lib/ai/zai-adapter';
+import { ProviderError } from '@/lib/ai/zai-adapter';
+import { streamChatRouted, completeChatRouted, type RouteAttribution } from '@/lib/ai/router';
 import { SSE_HEADERS, sseDone, sseEvent } from '@/lib/ai/sse';
 import { corsPreflight, corsJson } from '@/lib/api/cors';
 import {
@@ -196,7 +197,7 @@ export async function POST(req: Request) {
     logClientError(409, 'model_disabled', message, model.modelId);
     return openAiError(409, 'model_disabled', message, 'invalid_request_error', undefined, authHeaders);
   }
-  if (model.provider !== 'zai') {
+  if (model.provider !== 'zai' && model.category !== 'emorai') {
     return openAiError(
       501,
       'provider_unavailable',
@@ -261,6 +262,9 @@ export async function POST(req: Request) {
   const created = Math.floor(Date.now() / 1000);
   const completionId = randomId('chatcmpl');
   const includeUsage = body.stream_options?.include_usage === true;
+  // routing attribution — the router fills route/account/upstream before the
+  // first event so usage records map to the actual execution path
+  const attribution: RouteAttribution = {};
 
   // ── Streaming (OpenAI chunk protocol) ──────────────────────────────────────
   if (body.stream) {
@@ -298,18 +302,22 @@ export async function POST(req: Request) {
             ...baseChunk(),
             choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
           });
-          for await (const ev of streamChat({
-            messages: providerMessages,
-            modelId: model.modelId,
-            provider: model.provider,
-            temperature: body.temperature ?? settings.temperature,
-            maxTokens,
-            topP: body.top_p,
-            stop,
-            tools: providerTools,
-            toolChoice: body.tool_choice,
-            signal: abortController.signal,
-          })) {
+          for await (const ev of streamChatRouted(
+            body.model,
+            {
+              messages: providerMessages,
+              temperature: body.temperature ?? settings.temperature,
+              maxTokens,
+              topP: body.top_p,
+              stop,
+              tools: providerTools,
+              toolChoice: body.tool_choice,
+              signal: abortController.signal,
+              requestId,
+              attribution,
+            },
+            { vision: hasImageParts, tools: !!(providerTools && providerTools.length > 0) }
+          )) {
             if (ev.type === 'delta') {
               full += ev.content;
               sendChunk({ ...baseChunk(), choices: [{ index: 0, delta: { content: ev.content }, finish_reason: null }] });
@@ -394,6 +402,8 @@ export async function POST(req: Request) {
               : estimateUsage(providerMessages, full, Object.values(toolCallsOut).map((t) => ({ arguments: t.args }))),
             latencyMs: Date.now() - startedAt,
             success: true,
+            routeId: attribution.routeId ?? null,
+            providerAccountId: attribution.providerAccountId ?? null,
           });
           controller.enqueue(encoder.encode(sseDone()));
         } catch (e) {
@@ -410,6 +420,8 @@ export async function POST(req: Request) {
             success: false,
             errorText: err.message,
             latencyMs: Date.now() - startedAt,
+            routeId: attribution.routeId ?? null,
+            providerAccountId: attribution.providerAccountId ?? null,
           });
           sendChunk({
             ...baseChunk(),
@@ -444,17 +456,21 @@ export async function POST(req: Request) {
 
   // ── Non-streaming ──────────────────────────────────────────────────────────
   try {
-    const res = await completeChat({
-      messages: providerMessages,
-      modelId: model.modelId,
-      provider: model.provider,
-      temperature: body.temperature ?? settings.temperature,
-      maxTokens,
-      topP: body.top_p,
-      stop,
-      tools: providerTools,
-      toolChoice: body.tool_choice,
-    });
+    const res = await completeChatRouted(
+      body.model,
+      {
+        messages: providerMessages,
+        temperature: body.temperature ?? settings.temperature,
+        maxTokens,
+        topP: body.top_p,
+        stop,
+        tools: providerTools,
+        toolChoice: body.tool_choice,
+        requestId,
+        attribution,
+      },
+      { vision: hasImageParts, tools: !!(providerTools && providerTools.length > 0) }
+    );
     if ((!res.content || res.content.trim().length === 0) && res.toolCalls.length === 0) {
       throw new ProviderError('provider_error', 'The provider returned an empty response.');
     }
@@ -471,6 +487,8 @@ export async function POST(req: Request) {
       usage,
       latencyMs: Date.now() - startedAt,
       success: true,
+      routeId: attribution.routeId ?? null,
+      providerAccountId: attribution.providerAccountId ?? null,
     });
     const message: Record<string, unknown> = { role: 'assistant', content: res.content };
     if (res.toolCalls.length > 0) {
@@ -514,6 +532,8 @@ export async function POST(req: Request) {
       success: false,
       errorText: err.message,
       latencyMs: Date.now() - startedAt,
+      routeId: attribution.routeId ?? null,
+      providerAccountId: attribution.providerAccountId ?? null,
     });
     const headers = { ...authHeaders };
     if (err.code === 'rate_limited') headers['retry-after'] = '15';

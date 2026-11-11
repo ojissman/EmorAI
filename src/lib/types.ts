@@ -22,12 +22,28 @@ export const DEFAULT_CAPABILITIES: ModelCapabilities = {
 
 export type ModelStatus = 'ok' | 'error';
 
+export type ModelCategory = 'emorai' | 'provider';
+
+export type ModelLifecycle = 'draft' | 'preview' | 'active' | 'deprecated' | 'retired';
+
+export type ModelPricing = {
+  inputPerMTok: number;
+  outputPerMTok: number;
+  currency: string;
+};
+
 export type ModelInfo = {
   id: string;
   modelId: string;
   displayName: string;
   description: string;
   provider: string;
+  // Category A (official unified family) vs Category B (upstream provider model)
+  category: ModelCategory;
+  lifecycle: ModelLifecycle;
+  // EmorAI product generation, e.g. "5.3" (null for provider models)
+  generation: string | null;
+  pricing: ModelPricing | null;
   capabilities: ModelCapabilities;
   freeTier: boolean;
   enabled: boolean;

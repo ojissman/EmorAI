@@ -82,6 +82,16 @@ model ModelConfig {
   description     String    @default("")
   // zai | openai | anthropic | ... (adapter routing for future providers)
   provider        String    @default("zai")
+  // emorai | provider — Category A (official unified family: emor-5.3, …)
+  // vs Category B (upstream provider model exposed directly: glm-5.3, …)
+  category        String    @default("provider")
+  // draft | preview | active | deprecated | retired (model lifecycle)
+  lifecycle       String    @default("active")
+  // product generation for the EmorAI family, e.g. "5.3" (null for provider models)
+  generation      String?
+  // pricing metadata { inputPerMTok, outputPerMTok, currency } — admin-configured
+  // only; never invented. null = not configured (reported as unknown)
+  pricing         Json?
   // { chat, reasoning, vision, files, webSearch, tools, json }
   capabilities    Json
   freeTier        Boolean   @default(true)
@@ -166,6 +176,9 @@ model UsageRecord {
   latencyMs       Int?
   success         Boolean  @default(true)
   errorText       String?
+  // routing attribution (populated when the request went through the router)
+  routeId           String?
+  providerAccountId String?
   createdAt       DateTime @default(now())
 
   @@index([createdAt])
@@ -216,4 +229,104 @@ model Artifact {
 
   @@index([kind, createdAt])
   @@index([status])
+}
+
+// ─── Provider accounts (multi-provider infrastructure) ────────────────────────
+// An authorized account on an upstream AI provider. Credentials are stored
+// AES-256-GCM encrypted (src/lib/crypto.ts) with a master key from the
+// environment — never plaintext. The bundled zai account uses
+// credentialMode "platform": credentials are managed by the platform SDK
+// environment, so no secret is stored at all.
+model ProviderAccount {
+  id             String       @id @default(cuid())
+  name           String
+  // zai | openai | anthropic | self-hosted (adapter key, see providers/index.ts)
+  providerType   String
+  // required for openai/anthropic/self-hosted adapters (base API URL)
+  baseUrl        String?
+  // AES-256-GCM ciphertext of the provider API key (null for platform mode)
+  apiKeyEnc      String?
+  // platform | stored — how credentials are supplied to the adapter
+  credentialMode String        @default("platform")
+  enabled        Boolean      @default(true)
+  // operational priority when multiple accounts can serve a route (lower wins)
+  priority       Int          @default(0)
+  // bounded concurrent executions for this account (0 = unlimited)
+  maxConcurrency Int          @default(0)
+  // per-account monthly budget in accounting currency; null = no budget set
+  monthlyBudget  Float?
+  lastCheckedAt  DateTime?
+  // ok | error | unknown (set by explicit validate/health actions and real executions)
+  lastStatus     String?
+  lastError      String?
+  requestCount   Int          @default(0)
+  routes         ModelRoute[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([providerType, enabled])
+}
+
+// ─── Model routes (EmorAI model → upstream execution path) ───────────────────
+// Many-to-many: one EmorAI model generation maps to many upstream routes; one
+// upstream model can back many EmorAI generations. A route existing in the DB
+// does NOT make it eligible — the router verifies enabled + account health +
+// capability subset before every selection.
+model ModelRoute {
+  id                String          @id @default(cuid())
+  // public ModelConfig.modelId this route serves (e.g. "emor-5.3")
+  publicModelId     String
+  providerAccount   ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
+  providerAccountId String
+  // upstream model ID executed on the provider (e.g. "glm-5.3")
+  upstreamModelId   String
+  // route preference within the model (lower = preferred primary)
+  priority          Int             @default(0)
+  enabled           Boolean         @default(true)
+  // capability subset verified for THIS route ({ chat, reasoning, vision, files,
+  // webSearch, tools, json }); requests needing a capability outside this set
+  // route elsewhere. null = inherit the public model's declared set.
+  capabilities      Json?
+  // bounded concurrent executions (0 = account default)
+  maxConcurrency    Int             @default(0)
+  // hard execution timeout for this route (ms)
+  timeoutMs         Int             @default(120000)
+  // cost/performance weight for balanced scoring (default 1.0)
+  weight            Float           @default(1.0)
+  // unknown | healthy | degraded | down — updated from real executions only
+  healthStatus      String          @default("unknown")
+  lastServedAt      DateTime?
+  lastError         String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([publicModelId, priority])
+  @@index([providerAccountId])
+}
+
+// ─── Routing decisions (admin transparency log) ──────────────────────────────
+// One row per routed request: which public model was requested, which routes
+// were candidates, which executed — and on failover, which failed and why.
+model RoutingDecision {
+  id              String   @id @default(cuid())
+  requestId       String
+  // public model ID requested by the caller
+  modelId         String
+  // routing strategy applied (balanced | priority | cost | performance)
+  strategy        String   @default("balanced")
+  // candidates considered: [{ routeId, upstreamModel, providerType, account,
+  //   score, rejected, rejectReason }] — admin-facing, never sent to customers
+  candidates      Json?
+  selectedRouteId String?
+  upstreamModel   String?
+  providerType    String?
+  attemptCount    Int      @default(1)
+  // routed | failed | direct (direct = no routes configured, legacy path)
+  finalStatus     String   @default("routed")
+  errorText       String?
+  latencyMs       Int?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([modelId, createdAt])
 }
