@@ -8,12 +8,22 @@ import { NextResponse, type NextRequest } from 'next/server';
  *
  * Proxy-aware: the app runs behind reverse proxies (Caddy gateway / preview
  * tunnel), so the browser's Origin may differ from the rewritten Host header
- * that reaches Next.js. We therefore accept an Origin that matches ANY host
- * advertised by the proxy chain (`Host`, `X-Forwarded-Host`). As a final
- * fallback, requests carrying no cookies are always allowed — CSRF is only
- * exploitable when ambient credentials (cookies) exist, and this install is
- * cookie-less by design. If cookie auth is ever added, the guard tightens
- * automatically.
+ * that reaches Next.js. Three layers make this robust:
+ *
+ *   1. Fetch Metadata: modern browsers attach `Sec-Fetch-Site` — a FORBIDDEN
+ *      header JavaScript cannot forge. `same-origin` (fetches from the app's
+ *      own origin) and `none` (direct user navigations) prove the request is
+ *      genuinely same-origin no matter how the tunnel rewrites Host /
+ *      X-Forwarded-Host. `cross-site`/`same-site` never vouch, so real CSRF
+ *      attempts still fall through to the strict checks below.
+ *   2. Host matching: accept an Origin that matches ANY host advertised by
+ *      the proxy chain (`Host`, `X-Forwarded-Host`).
+ *   3. Cookie scoping: requests carrying no cookies are always allowed —
+ *      CSRF is only exploitable when ambient credentials exist. Note that
+ *      platform-injected cookies on the preview-tunnel domain (analytics,
+ *      session markers) are NOT credentials of this cookie-less app, which is
+ *      precisely why layer 1 exists. If cookie auth is ever added, layers 1-2
+ *      still hold: a forged cross-site request cannot carry `same-origin`.
  */
 export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -24,40 +34,48 @@ export function proxy(req: NextRequest) {
       const origin = req.headers.get('origin');
       // Requests without Origin (curl, server-to-server) are allowed.
       if (origin) {
-        // Collect every host the proxy chain may present as "ours".
-        const allowedHosts = new Set<string>();
-        const push = (value: string | null) => {
-          if (!value) return;
-          // X-Forwarded-Host can be a comma-separated list across proxies.
-          for (const part of value.split(',')) {
-            const host = part.trim().toLowerCase();
-            if (host) allowedHosts.add(host);
+        // Layer 1 — the browser's own unforgeable verdict. A genuine
+        // cross-site request can never carry these values.
+        const fetchSite = req.headers.get('sec-fetch-site');
+        const browserVouchedSameOrigin =
+          fetchSite === 'same-origin' || fetchSite === 'none';
+
+        if (!browserVouchedSameOrigin) {
+          // Collect every host the proxy chain may present as "ours".
+          const allowedHosts = new Set<string>();
+          const push = (value: string | null) => {
+            if (!value) return;
+            // X-Forwarded-Host can be a comma-separated list across proxies.
+            for (const part of value.split(',')) {
+              const host = part.trim().toLowerCase();
+              if (host) allowedHosts.add(host);
+            }
+          };
+          push(req.headers.get('host'));
+          push(req.headers.get('x-forwarded-host'));
+
+          let originHost: string | null = null;
+          try {
+            originHost = new URL(origin).host.toLowerCase();
+          } catch {
+            originHost = null;
           }
-        };
-        push(req.headers.get('host'));
-        push(req.headers.get('x-forwarded-host'));
 
-        let originHost: string | null = null;
-        try {
-          originHost = new URL(origin).host.toLowerCase();
-        } catch {
-          originHost = null;
-        }
+          const matchesProxy = originHost !== null && allowedHosts.has(originHost);
+          const hasCookies = Boolean(req.headers.get('cookie'));
 
-        const matchesProxy = originHost !== null && allowedHosts.has(originHost);
-        const hasCookies = Boolean(req.headers.get('cookie'));
-
-        if (!matchesProxy && hasCookies) {
-          return NextResponse.json(
-            { error: { code: 'cross_origin_blocked', message: 'Cross-origin request rejected.' } },
-            { status: 403 }
-          );
-        }
-        if (originHost === null) {
-          return NextResponse.json(
-            { error: { code: 'invalid_origin', message: 'Invalid Origin header.' } },
-            { status: 403 }
-          );
+          if (!matchesProxy && hasCookies) {
+            return NextResponse.json(
+              { error: { code: 'cross_origin_blocked', message: 'Cross-origin request rejected.' } },
+              { status: 403 }
+            );
+          }
+          if (originHost === null) {
+            return NextResponse.json(
+              { error: { code: 'invalid_origin', message: 'Invalid Origin header.' } },
+              { status: 403 }
+            );
+          }
         }
       }
     }
