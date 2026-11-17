@@ -35,6 +35,9 @@ fi
 case "${1:-}" in
   encrypt)
     mkdir -p "$ROOT/secrets"
+    # tar fails on missing members — a wiped/recovered workspace may lack
+    # db/uploads before the first decrypt repopulates it.
+    mkdir -p "$ROOT/db" "$ROOT/db/uploads"
     # Normalize modes first so the archive always restores clean:
     # .env secret-only, db readable, uploads dir traversable.
     [ -f "$ROOT/.env" ] && chmod 600 "$ROOT/.env" || true

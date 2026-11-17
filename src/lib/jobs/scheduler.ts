@@ -27,6 +27,7 @@
 
 import { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
+import { readRecoveryPassphrase, snapshotBundle } from '@/lib/secrets-bundle';
 import { getSettings } from '@/lib/settings';
 import { recordCostForUsage } from '@/lib/billing';
 import { getAdapterByType, adapterContextForAccount } from '@/lib/ai/providers';
@@ -34,7 +35,7 @@ import type { AdapterContext, ProviderHealth } from '@/lib/ai/providers';
 
 // ─── Job registry ────────────────────────────────────────────────────────────
 
-export const JOB_NAMES = ['provider-health', 'model-sync', 'usage-reconcile', 'log-prune'] as const;
+export const JOB_NAMES = ['provider-health', 'model-sync', 'usage-reconcile', 'log-prune', 'secrets-snapshot'] as const;
 export type JobName = (typeof JOB_NAMES)[number];
 
 /** Whole-job skip sentinel — the JobRun row is finalized 'skipped' with a reason. */
@@ -47,6 +48,7 @@ const JOB_BODIES: Record<JobName, JobBody> = {
   'model-sync': runModelSync,
   'usage-reconcile': runUsageReconcile,
   'log-prune': runLogPrune,
+  'secrets-snapshot': runSecretsSnapshot,
 };
 
 // ─── Scheduler lifecycle (state on globalThis — survives module re-evaluation
@@ -78,6 +80,7 @@ const FALLBACK_CADENCE_MS: Record<JobName, number> = {
   'model-sync': 6 * 3_600_000,
   'usage-reconcile': 60 * 60_000,
   'log-prune': 24 * 3_600_000,
+  'secrets-snapshot': 6 * 3_600_000,
 };
 
 function clampInt(value: number, min: number, max: number): number {
@@ -110,6 +113,10 @@ async function cadenceMsFor(job: JobName): Promise<number> {
       return 60 * 60_000;
     case 'log-prune':
       return 24 * 3_600_000;
+    case 'secrets-snapshot':
+      // fixed cadence (like usage-reconcile/log-prune): the recovery bundle
+      // must stay recent even though no settings field drives it
+      return 6 * 3_600_000;
   }
 }
 
@@ -166,6 +173,7 @@ export function startScheduler(): void {
   scheduleFirstRun('model-sync', 15_000);
   scheduleFirstRun('usage-reconcile', 20_000);
   scheduleFirstRun('log-prune', 30_000);
+  scheduleFirstRun('secrets-snapshot', 60_000);
   console.log('[jobs] scheduler started:', JOB_NAMES.join(', '));
 }
 
@@ -638,5 +646,30 @@ async function runLogPrune(): Promise<Record<string, unknown>> {
     jobRunsKept,
     alertEventsDeleted,
     note: `JobRuns retained to the latest ${JOB_RUN_KEEP} by startedAt; acknowledged AlertEvents older than ${ALERT_RETENTION_DAYS} days pruned; unacknowledged alerts always kept.`,
+  };
+}
+
+// ─── secrets-snapshot ───────────────────────────────────────────────────────
+// Refreshes the workspace recovery bundle (.env + db + uploads → encrypted)
+// so a platform workspace wipe loses at most ~6h of state at boot-heal time.
+// The git-committed copy is NOT auto-committed (no git credentials in the
+// app); commit it periodically for off-machine backup. Without a passphrase
+// the job is SKIPPED honestly — the bundle then simply keeps its last state.
+async function runSecretsSnapshot(): Promise<Record<string, unknown>> {
+  const passphrase = await readRecoveryPassphrase();
+  if (!passphrase) {
+    throw new SkippedJob(
+      'no passphrase available (EMORAI_SECRET_PASSPHRASE env or secrets/recovery.passphrase) — bundle left as-is'
+    );
+  }
+  // Flush SQLite's WAL into the main db file FIRST so the snapshot is
+  // self-contained. $queryRawUnsafe — PRAGMA returns rows, which
+  // $executeRawUnsafe rejects ("Execute returned results").
+  await db.$queryRawUnsafe('PRAGMA wal_checkpoint(TRUNCATE)');
+  const { bytes } = await snapshotBundle(passphrase);
+  return {
+    bundleBytes: bytes,
+    walCheckpointed: true,
+    note: 'workspace recovery bundle refreshed; commit secrets/emorai-secrets.tar.gz.enc periodically for off-machine backup',
   };
 }
