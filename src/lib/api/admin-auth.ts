@@ -18,6 +18,13 @@
 //   • Handler-level enforcement via requireAdmin() — navigation-level gating
 //     is a convenience, never the control.
 //
+// Deployed-iframe channel (space-z.ai preview panel): browsers block
+// SameSite=Strict cookies in cross-site embeds, so the dashboard ALSO accepts
+// the session token via the X-Admin-Session header (returned in the login
+// response body). A header token is a NON-AMBIENT credential — a cross-site
+// attacker cannot make a victim's browser attach it — so the CSRF
+// double-submit applies only to the ambient-cookie path.
+//
 // All admin API routes call requireAdmin(req) and return its error response.
 
 import { randomBytes, createHash, scrypt as nodeScrypt, timingSafeEqual } from 'node:crypto';
@@ -31,6 +38,9 @@ const scrypt = promisify(nodeScrypt) as (pw: string, salt: Buffer, len: number, 
 export const SESSION_COOKIE = 'emor_admin_session';
 export const CSRF_COOKIE = 'emor_admin_csrf';
 export const CSRF_HEADER = 'x-csrf-token';
+/** Header carrying the admin session token (login response body) — the
+ *  cookie-free channel that works inside cross-site embeds (preview panel). */
+export const SESSION_HEADER = 'x-admin-session';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const SCRYPT_N = 16384, SCRYPT_r = 8, SCRYPT_p = 1, SCRYPT_LEN = 64;
 
@@ -105,19 +115,42 @@ function parseCookies(req: Request): Record<string, string> {
   return out;
 }
 
-/** Validates the session cookie against the DB (not revoked, not expired). */
+/** Validates the session (header token or cookie) against the DB (not revoked, not expired). */
 export async function validateAdminSession(req: Request): Promise<AdminSessionInfo | null> {
+  // Channel 1 — explicit header token (deployed-iframe / cookie-blocked contexts).
+  // The header value is looked up exactly like the cookie token: hashed, unique.
+  const headerToken = req.headers.get(SESSION_HEADER);
+  if (headerToken && headerToken.length >= 32 && headerToken.length <= 512) {
+    const row = await db.adminSession.findUnique({ where: { tokenHash: sha256(headerToken) } });
+    if (row && !row.revokedAt && row.expiresAt.getTime() > Date.now()) {
+      touchSession(row);
+      return { sessionId: row.id, csrfToken: row.csrfToken, expiresAt: row.expiresAt };
+    }
+    // Header token invalid/stale → fall through to the ambient cookie channel
+    // (a top-level tab may hold perfectly good cookies alongside a stale token).
+  }
+
   const token = parseCookies(req)[SESSION_COOKIE];
   if (!token) return null;
   const row = await db.adminSession.findUnique({ where: { tokenHash: sha256(token) } });
   if (!row) return null;
   if (row.revokedAt) return null;
   if (row.expiresAt.getTime() <= Date.now()) return null;
-  // throttled lastSeen touch (≤1 write/minute per session)
+  touchSession(row);
+  return { sessionId: row.id, csrfToken: row.csrfToken, expiresAt: row.expiresAt };
+}
+
+/** Throttled lastSeen touch (≤1 write/minute per session). */
+function touchSession(row: { id: string; lastSeenAt: Date }): void {
   if (Date.now() - row.lastSeenAt.getTime() > 60_000) {
     void db.adminSession.update({ where: { id: row.id }, data: { lastSeenAt: new Date() } }).catch(() => undefined);
   }
-  return { sessionId: row.id, csrfToken: row.csrfToken, expiresAt: row.expiresAt };
+}
+
+/** True when the request authenticated via the explicit header token channel. */
+function hasSessionHeaderToken(req: Request): boolean {
+  const v = req.headers.get(SESSION_HEADER);
+  return Boolean(v && v.length >= 32 && v.length <= 512);
 }
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -128,7 +161,11 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  *
  *  401 — no/invalid/expired/revoked session
  *  403 — customer API-key credential presented to an admin endpoint
- *  403 — missing/mismatched CSRF token on a mutating request
+ *  403 — missing/mismatched CSRF token on a mutating request (cookie path)
+ *
+ * Header-token authenticated requests (X-Admin-Session) are authorized
+ * without the CSRF double-submit: a token the attacker cannot read cannot
+ * be attached by a forged cross-site request — it is not ambient authority.
  */
 export async function requireAdmin(req: Request): Promise<NextResponse | null> {
   // A customer API key must never authenticate administration, even by accident.
@@ -138,12 +175,13 @@ export async function requireAdmin(req: Request): Promise<NextResponse | null> {
     return fail(403, 'api_key_not_admin_credential', 'EmorAI API keys are customer credentials. They cannot administer the platform. Administrator access requires a dashboard session.');
   }
 
+  const viaHeaderToken = hasSessionHeaderToken(req);
   const session = await validateAdminSession(req);
   if (!session) {
     return fail(401, 'admin_auth_required', 'Administrator session required. Log in through the dashboard.');
   }
 
-  if (MUTATING.has(req.method)) {
+  if (MUTATING.has(req.method) && !viaHeaderToken) {
     const headerToken = req.headers.get(CSRF_HEADER) ?? '';
     const cookieToken = parseCookies(req)[CSRF_COOKIE] ?? '';
     if (!headerToken || headerToken !== session.csrfToken || cookieToken !== session.csrfToken) {
@@ -215,6 +253,11 @@ export async function adminLogin(req: Request, password: string): Promise<LoginR
 }
 
 export async function adminLogout(req: Request): Promise<void> {
+  // Revoke whichever channel the caller used: header token and/or cookie token.
+  const headerToken = req.headers.get(SESSION_HEADER);
+  if (headerToken && headerToken.length >= 32 && headerToken.length <= 512) {
+    await db.adminSession.updateMany({ where: { tokenHash: sha256(headerToken), revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => undefined);
+  }
   const token = parseCookies(req)[SESSION_COOKIE];
   if (token) {
     await db.adminSession.updateMany({ where: { tokenHash: sha256(token), revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => undefined);

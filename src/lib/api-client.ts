@@ -5,35 +5,103 @@
 export const ADMIN_SESSION_EXPIRED_EVENT = 'emor:admin-session-expired';
 /** Readable CSRF cookie set by POST /api/admin/auth/login (double-submit echo). */
 const CSRF_COOKIE = 'emor_admin_csrf';
+/** Session-token header — the cookie-free channel for embedded previews. */
+export const ADMIN_SESSION_HEADER = 'X-Admin-Session';
+/** sessionStorage keys persisting the admin tokens across iframe reloads. */
+const SESSION_TOKEN_STORE = 'emor_admin_session_token';
+const CSRF_TOKEN_STORE = 'emor_admin_csrf_token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-/** Reads the CSRF cookie for the double-submit echo; null when absent (the 403 surfaces). */
+// Module-level mirror of the admin session token (instant access). Login
+// writes it; 401/logout clears it. sessionStorage persists across reloads.
+let adminSessionToken: string | null = null;
+let adminCsrfToken: string | null = null;
+
+function readStoredToken(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null; // storage blocked — header channel simply inactive
+  }
+}
+
+function writeStoredToken(key: string, value: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (value === null) window.sessionStorage.removeItem(key);
+    else window.sessionStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
+function currentSessionToken(): string | null {
+  return adminSessionToken ?? readStoredToken(SESSION_TOKEN_STORE);
+}
+
+/** Persists the login-issued session + CSRF tokens (memory + sessionStorage). */
+export function saveAdminTokens(sessionToken: string, csrfToken?: string): void {
+  adminSessionToken = sessionToken;
+  adminCsrfToken = csrfToken ?? null;
+  writeStoredToken(SESSION_TOKEN_STORE, sessionToken);
+  if (csrfToken) writeStoredToken(CSRF_TOKEN_STORE, csrfToken);
+}
+
+/** Drops all stored admin tokens (logout / 401 expiry / password change). */
+export function clearAdminTokens(): void {
+  adminSessionToken = null;
+  adminCsrfToken = null;
+  writeStoredToken(SESSION_TOKEN_STORE, null);
+  writeStoredToken(CSRF_TOKEN_STORE, null);
+}
+
+/** Reads the CSRF token: cookie first (canonical), stored fallback (iframes).
+ *  Null when absent — the cookie path's 403 then surfaces as designed. */
 function csrfTokenFromCookie(): string | null {
   if (typeof document === 'undefined') return null;
   const match = document.cookie
     .split(';')
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${CSRF_COOKIE}=`));
-  if (!match) return null;
-  const raw = match.slice(CSRF_COOKIE.length + 1);
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
+  if (match) {
+    const raw = match.slice(CSRF_COOKIE.length + 1);
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
   }
+  return adminCsrfToken ?? readStoredToken(CSRF_TOKEN_STORE);
+}
+
+/**
+ * Auth headers for ANY dashboard API call — including raw fetch() sites
+ * (chat streaming, agent runs, voice mode). The X-Admin-Session token keeps
+ * working where cross-site embeds block cookies; the CSRF echo covers the
+ * ambient-cookie path for mutating requests.
+ */
+export function adminAuthHeaders(method: string | undefined): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const sessionToken = currentSessionToken();
+  if (sessionToken) headers[ADMIN_SESSION_HEADER] = sessionToken;
+  if (method && MUTATING_METHODS.has(method.toUpperCase())) {
+    const token = csrfTokenFromCookie();
+    if (token) headers['X-CSRF-Token'] = token;
+  }
+  return headers;
 }
 
 /** X-CSRF-Token header for mutating requests when a CSRF cookie exists (absent → omitted). */
 function csrfHeaders(method: string | undefined): Record<string, string> {
-  if (!method || !MUTATING_METHODS.has(method.toUpperCase())) return {};
-  const token = csrfTokenFromCookie();
-  return token ? { 'X-CSRF-Token': token } : {};
+  return adminAuthHeaders(method);
 }
 
 /** Lets the admin gate react to session expiry discovered by ANY dashboard call. */
 function notifyAdminSessionExpired(status: number, code: string): void {
   if (status !== 401 || code !== 'admin_auth_required') return;
   if (typeof window === 'undefined') return;
+  clearAdminTokens();
   window.dispatchEvent(new CustomEvent(ADMIN_SESSION_EXPIRED_EVENT));
 }
 

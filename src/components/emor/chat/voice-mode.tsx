@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
-import { transcribeAudioClient } from '@/lib/api-client';
+import { transcribeAudioClient, adminAuthHeaders } from '@/lib/api-client';
 import { useDictation } from '@/hooks/use-dictation';
 import { useSpeech } from '@/hooks/use-speech';
 import type { ModelInfo } from '@/lib/types';
@@ -88,7 +88,7 @@ export function VoiceModeDialog({ conversationId, model }: VoiceModeDialogProps)
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...adminAuthHeaders('POST') },
           body: JSON.stringify({
             conversationId: conversationId ?? undefined,
             message: userText,

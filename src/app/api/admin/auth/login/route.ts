@@ -27,6 +27,11 @@ export async function POST(req: Request) {
     username: 'admin',
     expiresAt: result.expiresAt.toISOString(),
     csrfToken: result.csrfToken,
+    // Session token for the header channel: lets the dashboard authenticate
+    // where cookies are blocked (cross-site embeds like the space-z.ai preview
+    // panel). Stored client-side only for the session lifetime — identical
+    // revocation/expiry semantics as the cookie channel.
+    sessionToken: result.token,
   });
   for (const cookie of sessionCookies(req, result.token, result.csrfToken, result.expiresAt)) {
     res.headers.append('set-cookie', cookie);

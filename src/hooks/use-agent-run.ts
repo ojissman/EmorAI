@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from 'react';
+import { adminAuthHeaders } from '@/lib/api-client';
 import type { AgentPlan, AgentRunEvent, AgentStep, SerializedArtifact } from '@/lib/types';
 
 export type AgentRunState = {
@@ -46,7 +47,7 @@ export function useAgentRun() {
       try {
         const res = await fetch('/api/agent/run', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...adminAuthHeaders('POST') },
           body: JSON.stringify(args),
           signal: controller.signal,
         });

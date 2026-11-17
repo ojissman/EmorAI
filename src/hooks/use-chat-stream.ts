@@ -5,6 +5,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useEmorStore } from '@/stores/emor-store';
 import { optimisticUserMessage } from '@/stores/emor-store';
+import { adminAuthHeaders } from '@/lib/api-client';
 import type { ChatStreamEvent, MessageAttachment, SerializedConversation } from '@/lib/types';
 
 type SendArgs = {
@@ -54,7 +55,7 @@ export function useChatStream() {
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...adminAuthHeaders('POST') },
           body: JSON.stringify({
             conversationId: conversationId ?? undefined,
             message: args.message,

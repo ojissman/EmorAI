@@ -6,13 +6,15 @@
 // error (network, 5xx) still surfaces as a query error with a retry.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api } from '@/lib/api-client';
+import { ApiError, api, saveAdminTokens, clearAdminTokens } from '@/lib/api-client';
 
 export type AdminSession = {
   authenticated: boolean;
   username?: string;
   expiresAt?: string;
   csrfToken?: string;
+  /** Session token for the header channel (present right after login). */
+  sessionToken?: string;
 };
 
 export const ADMIN_SESSION_QUERY_KEY = ['admin-session'] as const;
@@ -38,8 +40,11 @@ export function useAdminLogin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (password: string) =>
-      api.post<AdminSession & { authenticated: true }>('/api/admin/auth/login', { password }),
+      api.post<AdminSession & { authenticated: true; sessionToken: string }>('/api/admin/auth/login', { password }),
     onSuccess: (data) => {
+      // Persist the header-channel token (works where embeds block cookies)
+      // alongside the cookie session the response also installs.
+      saveAdminTokens(data.sessionToken, data.csrfToken);
       qc.setQueryData(ADMIN_SESSION_QUERY_KEY, data);
       // Dashboard queries may hold cache from the logged-out period; a blanket
       // invalidate makes the freshly authenticated mount refetch everything.
@@ -53,6 +58,8 @@ export function useAdminLogout() {
   return useMutation({
     mutationFn: () => api.post<{ authenticated: false }>('/api/admin/auth/logout'),
     onSuccess: () => {
+      // Drop the stored header-channel token (server revoked the session).
+      clearAdminTokens();
       // Drop ALL cached dashboard data (it belonged to the revoked session),
       // then park the session query in the logged-out state without a refetch.
       qc.clear();

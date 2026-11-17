@@ -1,6 +1,6 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
-import { requireAdmin } from '@/lib/api/admin-auth';
+import { requireArtifactAccess } from '@/lib/artifact-access';
 import { refreshAsyncArtifact } from '@/lib/artifacts';
 import { readArtifactFile } from '@/lib/ai/media';
 
@@ -30,10 +30,12 @@ function safeName(title: string, mime: string): string {
 }
 
 export async function GET(req: Request, { params }: Params) {
-  const denied = await requireAdmin(req);
+  const { id } = await params;
+  // Admin session OR short-lived signed URL (browser-native <img>/<video>
+  // loads cannot send headers/cookies through cross-site embeds).
+  const denied = await requireArtifactAccess(req, id);
   if (denied) return denied;
 
-  const { id } = await params;
   let artifact = await db.artifact.findUnique({ where: { id } });
   if (!artifact) return fail(404, 'artifact_not_found', 'That artifact does not exist.');
   artifact = await refreshAsyncArtifact(artifact);

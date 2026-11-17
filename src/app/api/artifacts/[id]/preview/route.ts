@@ -1,6 +1,6 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
-import { requireAdmin } from '@/lib/api/admin-auth';
+import { requireArtifactAccess } from '@/lib/artifact-access';
 import { parseArtifactFiles } from '@/lib/artifacts';
 
 export const runtime = 'nodejs';
