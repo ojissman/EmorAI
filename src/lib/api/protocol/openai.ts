@@ -104,6 +104,12 @@ export const chatCompletionsBodySchema = z.object({
   tool_choice: toolChoiceSchema.optional(),
   stream_options: z.object({ include_usage: z.boolean().optional() }).optional(),
   user: z.string().max(256).optional(),
+  // Reasoning controls — captured (not stripped) so they can enable GLM
+  // extended thinking. reasoning_effort: OpenAI-style string (low/medium/high,
+  // plus liberal vocabulary); thinking: Anthropic/ZCode-style object with
+  // effort levels — see protocol/thinking.ts for the mapping.
+  reasoning_effort: z.string().max(32).optional(),
+  thinking: z.object({ type: z.string().max(32).optional(), budget_tokens: z.number().int().optional() }).optional(),
   // accepted-and-ignored optional params common in the wild
   response_format: z.unknown().optional(),
   logit_bias: z.unknown().optional(),

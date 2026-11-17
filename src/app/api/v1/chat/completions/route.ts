@@ -18,6 +18,7 @@ import {
 } from '@/lib/api/protocol/openai';
 import type { ProviderContentPart, ProviderMessage, ProviderTool, ProviderToolCall } from '@/lib/types';
 import { normalizeChatRole, finalizeProviderMessages } from '@/lib/api/protocol/roles';
+import { mapThinkingToEnabled, reasoningEffortToEnabled } from '@/lib/api/protocol/thinking';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -306,6 +307,9 @@ export async function POST(req: Request) {
               stop,
               tools: providerTools,
               toolChoice: body.tool_choice,
+              // reasoning controls → upstream extended thinking
+              thinkingEnabled:
+                reasoningEffortToEnabled(body.reasoning_effort) || mapThinkingToEnabled(body.thinking),
               signal: abortController.signal,
               requestId,
               attribution,
@@ -460,6 +464,9 @@ export async function POST(req: Request) {
         stop,
         tools: providerTools,
         toolChoice: body.tool_choice,
+        // reasoning controls → upstream extended thinking
+        thinkingEnabled:
+          reasoningEffortToEnabled(body.reasoning_effort) || mapThinkingToEnabled(body.thinking),
         requestId,
         attribution,
       },

@@ -20,6 +20,7 @@ import { corsJson } from '@/lib/api/cors';
 import type { ProviderContentPart, ProviderMessage, ProviderTool, ProviderToolCall, TokenUsage } from '@/lib/types';
 import type { StreamEvent, ToolCallDelta } from '@/lib/ai/zai-adapter';
 import { normalizeChatRole, finalizeProviderMessages } from '@/lib/api/protocol/roles';
+import { mapThinkingToEnabled } from '@/lib/api/protocol/thinking';
 
 // ─── Error envelope ──────────────────────────────────────────────────────────
 
@@ -183,7 +184,11 @@ export const anthropicBodySchema = z.object({
   tool_choice: anthropicToolChoiceSchema.optional(),
   metadata: z.object({ user_id: z.string().max(256).optional() }).optional(),
   thinking: z
-    .object({ type: z.enum(['enabled', 'disabled']), budget_tokens: z.number().int().optional() })
+    // Liberal vocabulary: Anthropic's enabled|disabled plus the effort-style
+    // levels (low/medium/high/max/…) tools like ZCode send. mapThinkingToEnabled
+    // resolves the full vocabulary onto the upstream boolean — strict schemas
+    // here previously rejected ZCode's EmorAI model configs outright.
+    .object({ type: z.string().max(32).optional(), budget_tokens: z.number().int().optional() })
     .optional(),
 });
 
@@ -461,7 +466,7 @@ export function anthropicToProvider(
     topP: body.top_p,
     topK: body.top_k,
     stop: body.stop_sequences && body.stop_sequences.length > 0 ? body.stop_sequences : undefined,
-    thinkingEnabled: body.thinking?.type === 'enabled',
+    thinkingEnabled: mapThinkingToEnabled(body.thinking),
   };
 }
 
