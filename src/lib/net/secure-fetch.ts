@@ -145,14 +145,16 @@ function capBodyStream(source: ReadableStream<Uint8Array>, maxBytes: number): Re
         controller.close();
         return;
       }
-      let chunk: ReadableStreamReadResult<Uint8Array>;
+      // node's fetch returns the default-read result where `value` is
+      // optional on the done-variant — declare via the reader's own type.
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
       try {
         chunk = await reader.read();
       } catch (e) {
         controller.error(e);
         return;
       }
-      if (chunk.done) {
+      if (chunk.done || !chunk.value) {
         controller.close();
         return;
       }
@@ -221,7 +223,7 @@ export async function secureFetch(url: string, init: RequestInit, opts: SecureFe
 
   let headers = headersToRecord(init);
   let method = (init.method ?? 'GET').toUpperCase();
-  let body: BodyInit | undefined = init.body;
+  let body: BodyInit | undefined = init.body ?? undefined;
   // a streaming body can only be sent once — it cannot follow a 307/308 hop
   const bodyReplayable = !(body instanceof ReadableStream);
 
@@ -239,7 +241,10 @@ export async function secureFetch(url: string, init: RequestInit, opts: SecureFe
     }
 
     const current = new URL(currentUrl);
-    const fetchInit: RequestInit = {
+    // `duplex: 'half'` is required by Node's fetch for streaming bodies but is
+    // absent from lib.dom's RequestInit — carry it through a widened type.
+    type FetchInitWithDuplex = RequestInit & { duplex?: 'half' };
+    const fetchInit: FetchInitWithDuplex = {
       method,
       headers,
       redirect: 'manual', // never let the runtime follow redirects for us
@@ -247,7 +252,8 @@ export async function secureFetch(url: string, init: RequestInit, opts: SecureFe
     };
     if (method !== 'GET' && method !== 'HEAD') {
       fetchInit.body = body;
-      if (init.duplex) fetchInit.duplex = init.duplex;
+      const duplex = (init as FetchInitWithDuplex).duplex;
+      if (duplex) fetchInit.duplex = duplex;
     }
 
     const res = await doFetch(currentUrl, fetchInit);

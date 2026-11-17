@@ -122,7 +122,8 @@ export function useChatStream() {
                     optimisticUserMessage: null,
                   });
                   // A brand-new conversation was created server-side: adopt it.
-                  if (s.mode === 'send' && s.conversationId !== evt.conversationId) {
+                  // (s can be null if this start-arrives-after-done — then skip.)
+                  if (s?.mode === 'send' && s.conversationId !== evt.conversationId) {
                     store.getState().setActiveConversation(evt.conversationId);
                   }
                   void qc.invalidateQueries({ queryKey: ['messages', evt.conversationId] });
