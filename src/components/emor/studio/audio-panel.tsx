@@ -7,6 +7,7 @@ import { AudioLines, Loader2, Sparkles } from 'lucide-react';
 
 import { api, artifactUrls, ApiError } from '@/lib/api-client';
 import { useArtifacts } from '@/hooks/use-artifacts';
+import { useArtifactUrl } from '@/hooks/use-artifact-url';
 import type { SerializedArtifact } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -56,6 +57,20 @@ const VOICES = [
 type Voice = (typeof VOICES)[number]['value'];
 
 type SessionInfo = { voice?: Voice; speed?: number; words: number };
+
+/** Audio element with a short-lived signed URL — <audio> cannot send the
+ *  admin session header and cookies are dropped in cross-site embeds. */
+function SignedAudio({ id }: { id: string }) {
+  const signedUrl = useArtifactUrl(id, 'file');
+  return (
+    <audio
+      controls
+      preload="none"
+      src={signedUrl ?? undefined}
+      className="h-9 w-full"
+    />
+  );
+}
 
 export function AudioPanel() {
   const qc = useQueryClient();
@@ -238,12 +253,7 @@ export function AudioPanel() {
                   </div>
                   <div className="px-3 pb-3">
                     {a.status === 'ready' ? (
-                      <audio
-                        controls
-                        preload="none"
-                        src={artifactUrls.file(a.id)}
-                        className="h-9 w-full"
-                      />
+                      <SignedAudio id={a.id} />
                     ) : a.status === 'failed' ? (
                       <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                         {a.error ?? 'Speech generation failed.'}

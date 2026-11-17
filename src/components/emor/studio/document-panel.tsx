@@ -15,9 +15,10 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
-import { api, artifactUrls, ApiError } from '@/lib/api-client';
+import { api, artifactUrls, ApiError, adminAuthHeaders } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { useArtifacts } from '@/hooks/use-artifacts';
+import { useArtifactUrl } from '@/hooks/use-artifact-url';
 import type { SerializedArtifact } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -296,6 +297,9 @@ function DocumentPreviewDialog({
   preview: { id: string; title: string; format: DocFormat } | null;
   onClose: () => void;
 }) {
+  // Signed URL so the <iframe> renders where cookies are blocked (preview
+  // panel embeds) — sibling links inside the document carry the token too.
+  const previewUrl = useArtifactUrl(preview?.id, 'preview');
   return (
     <Dialog open={preview !== null} onOpenChange={(o) => (o ? undefined : onClose())}>
       <DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl">
@@ -312,7 +316,7 @@ function DocumentPreviewDialog({
         {preview ? (
           preview.format === 'html' ? (
             <iframe
-              src={artifactUrls.preview(preview.id)}
+              src={previewUrl ?? artifactUrls.preview(preview.id)}
               title={`Preview of ${preview.title}`}
               className="h-[70vh] w-full flex-1 bg-background"
               sandbox="allow-same-origin"
@@ -332,7 +336,8 @@ function MarkdownPreview({ id }: { id: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(artifactUrls.file(id))
+    // JS fetch CAN send the session header — no signed URL needed here.
+    fetch(artifactUrls.file(id), { headers: adminAuthHeaders('GET') })
       .then(async (res) => {
         if (!res.ok) throw new Error(`Could not load the document (status ${res.status}).`);
         return res.text();

@@ -1,11 +1,11 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
-import { requireAdmin } from '@/lib/api/admin-auth';
+import { requireArtifactAccess } from '@/lib/artifact-access';
 import { parseArtifactFiles } from '@/lib/artifacts';
 
 export const runtime = 'nodejs';
 
-type Params = { params: Promise<{ path: string[] }> };
+type Params = { params: Promise<{ id: string; path: string[] }> };
 
 const TEXT_MIME: Record<string, string> = {
   html: 'text/html; charset=utf-8',
@@ -31,13 +31,17 @@ function mimeForPath(p: string): string {
 
 /** Serves a sibling file of a multi-file artifact (relative asset resolution). */
 export async function GET(req: Request, { params }: Params) {
-  const denied = await requireAdmin(req);
-  if (denied) return denied;
-
-  const { path: segments } = await params;
-  const artifactId = segments?.[0];
-  const subPath = segments?.slice(1).join('/');
+  // Route: /api/artifacts/[id]/preview/[...path] — the artifact id comes from
+  // the [id] segment; [...path] is purely the sibling path. (The previous
+  // implementation read the id out of [...path] — every request 400'd.)
+  const { id: artifactId, path: segments } = await params;
+  const subPath = segments?.join('/');
   if (!artifactId || !subPath) return fail(400, 'bad_path', 'Malformed artifact asset path.');
+
+  // Admin session OR signed URL token propagated from the entry HTML
+  // (rewriteEntryLinks appends ?ast=… to every sibling reference).
+  const denied = await requireArtifactAccess(req, artifactId);
+  if (denied) return denied;
 
   const artifact = await db.artifact.findUnique({ where: { id: artifactId } });
   if (!artifact) return fail(404, 'artifact_not_found', 'That artifact does not exist.');

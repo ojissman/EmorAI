@@ -16,6 +16,7 @@ import {
 import { api, artifactUrls, ApiError } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { useArtifact, useArtifacts } from '@/hooks/use-artifacts';
+import { useArtifactUrl } from '@/hooks/use-artifact-url';
 import type { SerializedArtifact } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {
@@ -369,6 +370,8 @@ function VideoCard({
   onDismiss?: () => void;
 }) {
   const ready = artifact.status === 'ready';
+  // Signed URL so the <video> loads where cookies are blocked (preview iframe).
+  const signedUrl = useArtifactUrl(ready ? artifact.id : null, 'file');
   const qualityMeta =
     artifact.meta?.quality === 'speed' || artifact.meta?.quality === 'quality'
       ? (artifact.meta.quality as string)
@@ -383,7 +386,7 @@ function VideoCard({
           <video
             controls
             preload="metadata"
-            src={artifactUrls.file(artifact.id)}
+            src={signedUrl ?? undefined}
             className="aspect-video w-full"
           />
         ) : (

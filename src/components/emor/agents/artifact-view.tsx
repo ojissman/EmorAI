@@ -33,6 +33,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { artifactUrls } from '@/lib/api-client';
+import { useArtifactUrl } from '@/hooks/use-artifact-url';
 import type { ArtifactFile, SerializedArtifact } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { byteSize, formatBytes, formatDate, kindMeta } from './agent-meta';
@@ -51,7 +52,9 @@ function copyToClipboard(content: string) {
 }
 
 function BrowserFrame({ artifact }: { artifact: SerializedArtifact }) {
-  const url = artifactUrls.preview(artifact.id);
+  // Signed URL so the <iframe> renders where cookies are blocked (preview
+  // panel embeds) — sibling links inside the artifact carry the token too.
+  const url = useArtifactUrl(artifact.status === 'ready' ? artifact.id : null, 'preview') ?? artifactUrls.preview(artifact.id);
   return (
     <div className="overflow-hidden rounded-lg border bg-background shadow-sm">
       <div className="flex items-center gap-2 border-b bg-muted/50 px-3 py-2">
@@ -165,6 +168,7 @@ export function ArtifactView({ artifact, onDelete, deletePending = false }: Arti
   const files = artifact.files ?? [];
   const totalSize = useMemo(() => files.reduce((sum, f) => sum + byteSize(f.content), 0), [files]);
   const pending = artifact.status === 'pending' || artifact.status === 'processing';
+  const zipUrl = useArtifactUrl(artifact.status === 'ready' ? artifact.id : null, 'zip') ?? artifactUrls.zip(artifact.id);
 
   return (
     <section className="space-y-4" aria-label={`Artifact ${artifact.title}`}>
@@ -204,7 +208,7 @@ export function ArtifactView({ artifact, onDelete, deletePending = false }: Arti
 
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="outline" size="sm" asChild>
-            <a href={artifactUrls.zip(artifact.id)} download aria-label={`Download ${artifact.title} as ZIP`}>
+            <a href={zipUrl} download aria-label={`Download ${artifact.title} as ZIP`}>
               <Download className="size-4" aria-hidden="true" />
               ZIP
             </a>

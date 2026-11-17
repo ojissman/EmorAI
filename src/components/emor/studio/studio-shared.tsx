@@ -8,6 +8,7 @@ import type { LucideIcon } from 'lucide-react';
 import { artifactUrls } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { useDeleteArtifact } from '@/hooks/use-artifacts';
+import { useArtifactUrl } from '@/hooks/use-artifact-url';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -195,6 +196,8 @@ export function StatusBadge({ status }: { status: string }) {
 }
 
 export function DownloadArtifactButton({ artifact }: { artifact: StudioArtifactView }) {
+  // Signed URL so downloads work where cookies are blocked (preview iframe).
+  const signedUrl = useArtifactUrl(artifact.status === 'ready' ? artifact.id : null, 'file');
   const disabled = artifact.status !== 'ready';
   return (
     <Button
@@ -207,7 +210,7 @@ export function DownloadArtifactButton({ artifact }: { artifact: StudioArtifactV
       onClick={() => {
         // Trigger through a temporary anchor so the browser honors `download`.
         const a = document.createElement('a');
-        a.href = artifactUrls.file(artifact.id);
+        a.href = signedUrl ?? artifactUrls.file(artifact.id);
         a.download = downloadNameFor(artifact);
         document.body.appendChild(a);
         a.click();

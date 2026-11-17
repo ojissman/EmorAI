@@ -16,6 +16,7 @@ import {
 import { api, artifactUrls, ApiError } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { useArtifacts } from '@/hooks/use-artifacts';
+import { useArtifactUrl } from '@/hooks/use-artifact-url';
 import type { SerializedArtifact } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -224,6 +225,8 @@ export function ImagePanel() {
 
 function ImageCard({ artifact }: { artifact: StudioArtifactView }) {
   const [loaded, setLoaded] = useState(false);
+  // Signed URL so the <img> loads where cookies are blocked (preview iframe).
+  const signedUrl = useArtifactUrl(artifact.status === 'ready' ? artifact.id : null, 'file');
   const [broken, setBroken] = useState(false);
   const sizeMeta = typeof artifact.meta?.size === 'string' ? (artifact.meta.size as string) : null;
 
@@ -248,7 +251,7 @@ function ImageCard({ artifact }: { artifact: StudioArtifactView }) {
               </div>
             ) : (
               <img
-                src={artifactUrls.file(artifact.id)}
+                src={signedUrl ?? undefined}
                 alt={artifact.title}
                 loading="lazy"
                 onLoad={() => setLoaded(true)}

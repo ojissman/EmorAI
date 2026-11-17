@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
-import { requireAdmin } from '@/lib/api/admin-auth';
+import { requireArtifactAccess } from '@/lib/artifact-access';
 import { parseArtifactFiles } from '@/lib/artifacts';
 import { readArtifactFile } from '@/lib/ai/media';
 
@@ -15,10 +15,11 @@ function safeBase(title: string): string {
 
 /** Zips a multi-file artifact (website/blog) or the single stored file. */
 export async function GET(req: Request, { params }: Params) {
-  const denied = await requireAdmin(req);
-  if (denied) return denied;
-
   const { id } = await params;
+  // Admin session OR short-lived signed URL (download anchors in cross-site
+  // embeds cannot send headers/cookies).
+  const denied = await requireArtifactAccess(req, id);
+  if (denied) return denied;
   const artifact = await db.artifact.findUnique({ where: { id } });
   if (!artifact) return fail(404, 'artifact_not_found', 'That artifact does not exist.');
   if (artifact.status !== 'ready') return fail(409, 'not_ready', `This artifact is still ${artifact.status}.`);

@@ -72,7 +72,8 @@ export function verifyArtifactToken(artifactId: string, token: string): boolean 
   if (expSec < Math.floor(Date.now() / 1000)) return false; // expired
   if (expSec > Math.floor(Date.now() / 1000) + ARTIFACT_TOKEN_TTL_SEC + 60) return false; // absurd future
 
-  const expected = Buffer.from(sign(artifactId, expSec));
+  // Compare ONLY the signature portion — sign() returns the full exp.sig pair.
+  const expected = Buffer.from(sign(artifactId, expSec).split('.')[1] ?? '', 'base64');
   const given = Buffer.from(sigPart.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
   return expected.length === given.length && timingSafeEqual(expected, given);
 }

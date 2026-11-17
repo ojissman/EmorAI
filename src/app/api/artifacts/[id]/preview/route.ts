@@ -1,38 +1,53 @@
 import { db } from '@/lib/db';
 import { fail } from '@/lib/api/response';
-import { requireArtifactAccess } from '@/lib/artifact-access';
+import { requireArtifactAccess, ARTIFACT_TOKEN_QUERY } from '@/lib/artifact-access';
 import { parseArtifactFiles } from '@/lib/artifacts';
 
 export const runtime = 'nodejs';
 
 type Params = { params: Promise<{ id: string }> };
 
-const TEXT_MIME: Record<string, string> = {
-  html: 'text/html; charset=utf-8',
-  htm: 'text/html; charset=utf-8',
-  css: 'text/css; charset=utf-8',
-  js: 'text/javascript; charset=utf-8',
-  mjs: 'text/javascript; charset=utf-8',
-  json: 'application/json; charset=utf-8',
-  svg: 'image/svg+xml',
-  md: 'text/markdown; charset=utf-8',
-};
-
-function mimeForPath(p: string): string {
-  const ext = p.split('.').pop()?.toLowerCase() ?? '';
-  return TEXT_MIME[ext] ?? 'application/octet-stream';
-}
+const SUBPATH_BASE = (artifactId: string) => `/api/artifacts/${artifactId}/preview/`;
 
 /**
- * Serves the entry HTML of a multi-file artifact inline so it can be previewed
- * inside a sandboxed iframe. Sibling files resolve relative links through
- * /api/artifacts/[id]/preview/[...path].
+ * Rewrites relative href/src references in an artifact's entry HTML to the
+ * signed subpath URLs. Serves two purposes:
+ *   1. relative links resolve correctly against the preview subpath route
+ *      (a plain `style.css` against `/api/artifacts/{id}/preview` would
+ *      otherwise resolve OUTSIDE the preview tree and 404);
+ *   2. the short-lived signed access token propagates to every sibling
+ *      request, so multi-file artifacts render inside cross-site embeds
+ *      (space-z.ai preview panel) where cookies never arrive.
+ */
+export function rewriteEntryLinks(html: string, artifactId: string, token: string | null): string {
+  const withToken = (path: string) =>
+    token
+      ? `${SUBPATH_BASE(artifactId)}${path}?${ARTIFACT_TOKEN_QUERY}=${encodeURIComponent(token)}`
+      : `${SUBPATH_BASE(artifactId)}${path}`;
+  return html.replace(
+    /(\s(?:href|src)\s*=\s*)(["'])([^"']*)\2/gi,
+    (match, prefix: string, quote: string, value: string) => {
+      if (!value) return match;
+      // Leave absolute, schemed, protocol-relative, fragment and API URLs alone.
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#|\/api\/|\/)/i.test(value)) return match;
+      const path = value.replace(/^\.\//, '').split(/[?#]/)[0];
+      if (!path || path.startsWith('../')) return match;
+      return `${prefix}${quote}${withToken(path.split('/').map(encodeURIComponent).join('/'))}${quote}`;
+    }
+  );
+}
+
+/** Serves the entry HTML of a multi-file artifact inline so it can be previewed
+ *  inside a sandboxed iframe. Sibling files resolve relative links through
+ *  /api/artifacts/[id]/preview/[...path].
  */
 export async function GET(req: Request, { params }: Params) {
-  const denied = await requireAdmin(req);
+  const { id } = await params;
+  // Admin session OR short-lived signed URL (browser-native iframe loads
+  // cannot send headers/cookies through cross-site embeds).
+  const denied = await requireArtifactAccess(req, id);
   if (denied) return denied;
 
-  const { id } = await params;
   const artifact = await db.artifact.findUnique({ where: { id } });
   if (!artifact) return fail(404, 'artifact_not_found', 'That artifact does not exist.');
   if (artifact.status !== 'ready') {
@@ -46,7 +61,10 @@ export async function GET(req: Request, { params }: Params) {
     files.find((f) => f.path.toLowerCase().endsWith('.html')) ??
     files[0];
 
-  return new Response(entry.content, {
+  const token = new URL(req.url).searchParams.get(ARTIFACT_TOKEN_QUERY);
+  const html = rewriteEntryLinks(entry.content, id, token);
+
+  return new Response(html, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
